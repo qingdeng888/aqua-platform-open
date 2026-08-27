@@ -10,11 +10,13 @@
 import asyncio
 import json
 import os
+import re
 import time
 import traceback
 import uuid
 import logging
 from app.error_tracker import track_error
+from app.security import hash_secret
 from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict
@@ -59,21 +61,54 @@ def is_cc_switch_request(request: Request) -> bool:
 # ========== 请求大小限制中间件 ==========
 
 class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
-    """限制请求体大小（10MB）"""
+    """限制请求体大小（10MB）——按实际读取字节强制，防chunked绕过content-length"""
     MAX_BYTES = 10 * 1024 * 1024
+    # 分块读取粒度（ASGI 服务端分块通常 <= 64KB，逐块累计校验，超限即中断）
+    CHUNK_SIZE = 64 * 1024
+
+    def _payload_too_large(self) -> JSONResponse:
+        return JSONResponse(
+            status_code=413,
+            content={"error": {
+                "message": "请求体过大，最大10MB",
+                "type": "invalid_request_error",
+                "code": "payload_too_large",
+            }},
+        )
 
     async def dispatch(self, request: Request, call_next):
         if request.method in ("POST", "PUT", "PATCH"):
             content_length = request.headers.get("content-length")
-            if content_length and int(content_length) > self.MAX_BYTES:
-                return JSONResponse(
-                    status_code=413,
-                    content={"error": {
-                        "message": "请求体过大，最大10MB",
-                        "type": "invalid_request_error",
-                        "code": "payload_too_large",
-                    }},
-                )
+            transfer_encoding = (request.headers.get("transfer-encoding") or "").lower()
+            if content_length and "chunked" not in transfer_encoding:
+                # 有 content-length 且非 chunked：仅校验头（保持现状）
+                try:
+                    if int(content_length) > self.MAX_BYTES:
+                        return self._payload_too_large()
+                except ValueError:
+                    # content-length 畸形 → 400 而非 500
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": {
+                            "message": "Content-Length 请求头格式非法",
+                            "type": "invalid_request_error",
+                            "code": "invalid_content_length",
+                        }},
+                    )
+            else:
+                # 无 content-length 或 Transfer-Encoding: chunked：按实际读取字节强制
+                # （逐块累计，累计到 MAX_BYTES+1 即中断返回 413，不再信任头声明）
+                chunks = []
+                total = 0
+                async for chunk in request.stream():
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > self.MAX_BYTES:
+                        return self._payload_too_large()
+                    chunks.append(chunk)
+                # 未超限：把已读字节缓存到 request._body（Starlette 会复用），下游无需重复读流
+                request._body = b"".join(chunks)
         return await call_next(request)
 
 
@@ -200,6 +235,7 @@ async def _flush_logs(batch):
 
         async with async_session_factory() as session:
             for item in batch:
+                # v10.1修复：token 字段——条目携带则用真实值，否则写 NULL（不再硬编码0）
                 await session.execute(
                     text("""INSERT INTO request_logs
                            (id, client_id, upstream_key_id, model, status_code, latency_ms, latency_us,
@@ -213,8 +249,14 @@ async def _flush_logs(batch):
                                    :request_path, :http_method, :client_ip, :user_agent,
                                    :request_params, :request_body, :response_body,
                                    :error_type, :error_detail, :error_stack, :business_code, :log_category, 0,
-                                   0, 0, 0)"""),
-                    {**item, "created_at": now_str},
+                                   :prompt_tokens, :completion_tokens, :total_tokens)"""),
+                    {
+                        **item,
+                        "created_at": now_str,
+                        "prompt_tokens": item.get("prompt_tokens"),
+                        "completion_tokens": item.get("completion_tokens"),
+                        "total_tokens": item.get("total_tokens"),
+                    },
                 )
             await session.commit()
     except ImportError:
@@ -261,35 +303,54 @@ async def _log_worker():
             batch = []
 
 
-def get_client_ip(request: Request) -> str:
-    """获取客户端真实IP（v10.0修复：跳过内网IP，优先CF-Connecting-IP）"""
-    # 1. 优先 CF-Connecting-IP（Cloudflare 真实IP）
-    cf_ip = request.headers.get("cf-connecting-ip")
-    if cf_ip and not _is_private_ip(cf_ip.strip()):
-        return cf_ip.strip()
+def _parse_ip(value: str):
+    """解析IP字符串，非法（不可信）返回None"""
+    try:
+        import ipaddress
+        return ipaddress.ip_address(value)
+    except Exception:
+        return None
 
-    # 2. X-Forwarded-For：取第一个非内网IP
+
+def get_client_ip(request: Request) -> str:
+    """获取客户端真实IP（v10.1修复：可信代理模型）
+
+    仅当对端（request.client.host）为私网/回环（即经可信反向代理接入）时才信任代理头；
+    公网直连时 CF-Connecting-IP / X-Forwarded-For 等头可被任意伪造，一律忽略。
+    AQUA_TRUST_PROXY_HEADERS=1 可强制信任代理头（CF 全程代理场景），默认 auto。
+    """
+    peer = request.client.host if request.client else "unknown"
+
+    # 强制信任开关（CF全程代理等场景）；默认 auto：按对端是否私网判断
+    force_trust = os.environ.get("AQUA_TRUST_PROXY_HEADERS", "").strip().lower() in ("1", "true", "yes")
+    if not force_trust and not _is_private_ip(peer):
+        # 公网直连：忽略所有可伪造头，直接返回对端IP
+        return peer
+
+    # --- 以下仅在对端为可信反向代理（或强制信任）时执行 ---
+    # 1. CF-Connecting-IP：Cloudflare 追加的真实客户端IP（取值且须为合法IP）
+    cf_ip = (request.headers.get("cf-connecting-ip") or "").strip()
+    if cf_ip and _parse_ip(cf_ip) is not None:
+        return cf_ip
+
+    # 2. X-Forwarded-For：取最右一个非私网值（最右侧由可信代理追加，攻击者无法在其右侧插值）
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        ips = [ip.strip() for ip in forwarded.split(",")]
-        for ip in ips:
-            if ip and not _is_private_ip(ip):
-                return ip
-        # 全是内网IP，取最后一个（最接近客户端的代理）
-        if ips:
-            return ips[-1]
+        for ip in reversed([x.strip() for x in forwarded.split(",")]):
+            parsed = _parse_ip(ip)
+            if parsed is None or parsed.is_private or parsed.is_loopback or parsed.is_reserved:
+                continue
+            return ip
 
-    # 3. X-Real-IP
-    xri = request.headers.get("x-real-ip")
-    if xri and not _is_private_ip(xri.strip()):
-        return xri.strip()
-
-    # 4. 最终回退到直连 IP
-    return request.client.host if request.client else "unknown"
+    # 3. 头中解析不出可信IP → 回退对端直连IP
+    return peer
 
 
 def _is_private_ip(ip: str) -> bool:
-    """判断是否内网IP"""
+    """判断是否内网/回环/保留IP（127.x、10.x、172.16-31.x、192.168.x、::1、fc00::/7 等）
+
+    解析失败一律按"不可信"处理：返回 False → 对端不视为可信代理，不信任转发头。
+    """
     try:
         import ipaddress
         addr = ipaddress.ip_address(ip)
@@ -312,6 +373,9 @@ def setup_middleware(app):
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # 注意：Starlette 后 add 的中间件位于外层、先执行
+    # 实际执行顺序：MaintenanceMode → RequestSizeLimit → RequestLogging → CORS
+    # （SizeLimit 必须在 RequestLogging 外层：先按实际字节截断超大/chunked请求体，日志层才限量读前4KB）
     app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(RequestSizeLimitMiddleware)
     app.add_middleware(MaintenanceModeMiddleware)
@@ -320,7 +384,7 @@ def setup_middleware(app):
 # ========== 全量请求日志中间件 ==========
 
 # 不记录日志的路径（健康检查、静态文件等无需记录的路径）
-_LOG_SKIP_PREFIXES = ("/healthz", "/static/", "/favicon.ico")
+_LOG_SKIP_PREFIXES = ("/healthz", "/static/", "/gw/static/", "/favicon.ico", "/robots.txt")
 # 由业务逻辑(_log_request)完整记录的API路径 - 中间件跳过以避免重复
 _LOG_BUSINESS_PREFIXES = ("/v1/chat/completions", "/api/v1/chat/completions", "/v1/embeddings", "/api/v1/embeddings")
 # 需要记录请求体的路径前缀
@@ -341,11 +405,64 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
 
     # 响应体最大记录长度（避免内存爆炸）
     MAX_RESPONSE_BODY_LEN = 65536  # 64KB（读取上限）
-    MAX_REQUEST_BODY_LEN = 16384   # 16KB（读取上限）
+    LOG_BODY_READ_LIMIT = 4096     # 请求体日志读取上限4KB（限量读，不为日志物化整个body）
     # 存储时截断长度（优化：避免DB膨胀）
     STORE_REQUEST_BODY_LEN = 4096   # 请求体存储上限4KB
     STORE_RESPONSE_BODY_LEN = 2048  # 响应体存储上限2KB
     STORE_ERROR_STACK_LEN = 2048    # 错误堆栈存储上限2KB
+
+    @staticmethod
+    async def _read_body_limited(request: Request, limit: int):
+        """限量读取请求体：返回 (前limit字节, 实际总字节数)
+
+        - 若外层中间件已缓存 request._body（chunked/无content-length场景），直接截取前缀；
+        - 否则从流读取：为保下游能完整重放（Starlette 会复用 request._body），
+          收干全部字节后缓存到 request._body（总量已由外层 SizeLimit 限制在10MB内），
+          日志仅保留前 limit 字节。
+        """
+        cached = getattr(request, "_body", None)
+        if cached is not None:
+            return cached[:limit], len(cached)
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+        request._body = bytes(buf)  # 缓存供下游完整重放
+        return bytes(buf[:limit]), len(buf)
+
+    @staticmethod
+    def _sanitize_request_body(body: str) -> str:
+        """脱敏请求体（v10.1修复：此前方法缺失导致请求体日志全部变为"[读取失败]"）
+
+        messages/input/contents 数组内容替换为 "[REDACTED len=N]"（保留 role/数量结构），
+        序列化后截断4KB；JSON解析失败返回原文前4KB。
+        """
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, ValueError):
+            return body[:RequestLoggingMiddleware.STORE_REQUEST_BODY_LEN]
+        if isinstance(data, dict):
+            for field in ("messages", "input", "contents"):
+                items = data.get(field)
+                if isinstance(items, list):
+                    data[field] = [RequestLoggingMiddleware._redact_message_item(it) for it in items]
+        try:
+            return json.dumps(data, ensure_ascii=False)[:RequestLoggingMiddleware.STORE_REQUEST_BODY_LEN]
+        except (TypeError, ValueError):
+            return body[:RequestLoggingMiddleware.STORE_REQUEST_BODY_LEN]
+
+    @staticmethod
+    def _redact_message_item(item):
+        """单条消息脱敏：保留 role/type/name 结构字段，正文替换为长度占位符"""
+        if isinstance(item, dict):
+            redacted = {k: v for k, v in item.items() if k in ("role", "type", "name")}
+            content = item.get("content", item.get("text", item.get("parts")))
+            redacted["content"] = f"[REDACTED len={len(content) if isinstance(content, (str, list, dict)) else 0}]"
+            return redacted
+        if isinstance(item, str):
+            return f"[REDACTED len={len(item)}]"
+        if isinstance(item, (list, dict)):
+            return f"[REDACTED len={len(json.dumps(item, ensure_ascii=False, default=str))}]"
+        return "[REDACTED len=0]"
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -373,18 +490,17 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         user_agent = request.headers.get("user-agent", "")[:512]
         query_params = str(request.query_params) if request.query_params else ""
 
-        # 采集请求体（仅API路径，且限制大小）
+        # 采集请求体（仅API路径，限量读前4KB用于日志，不物化整个body）
         request_body = ""
         if any(path.startswith(p) for p in _LOG_BODY_PREFIXES) and request.method in ("POST", "PUT", "PATCH"):
             try:
-                # 读取请求体但不消耗它（通过_cache机制）
-                body_bytes = await request.body()
-                if body_bytes and len(body_bytes) <= self.MAX_REQUEST_BODY_LEN:
+                body_bytes, body_total = await self._read_body_limited(request, self.LOG_BODY_READ_LIMIT)
+                if body_bytes and body_total > self.LOG_BODY_READ_LIMIT:
+                    request_body = f"[请求体过大: {body_total} bytes]"
+                elif body_bytes:
                     request_body = body_bytes.decode("utf-8", errors="replace")
                     # v10.0: 脱敏处理 - 移除敏感字段
                     request_body = self._sanitize_request_body(request_body)
-                elif body_bytes:
-                    request_body = f"[请求体过大: {len(body_bytes)} bytes]"
             except Exception:
                 request_body = "[读取失败]"
 
@@ -494,9 +610,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         client_name = ""
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
-            api_key_prefix = auth_header[7:20]  # 取key前13字符作为标识
-            # v10.0 修复：使用内存缓存避免每个请求都做同步DB查询（防止事件循环阻塞）
-            cache_key = f"ck:{api_key_prefix}"
+            api_key = auth_header[7:].strip()
+            # v10.1修复：middleware持有完整key → hash_secret 后按 key_hash 精确查询
+            # （此前用明文前13字符 LIKE 掩码列 key_prefix，永远 miss 且每请求2次同步DB）
+            key_hash = hash_secret(api_key)
+            cache_key = f"ck:{key_hash}"  # 以哈希为缓存键，避免明文key材料进入缓存键
             # 检查缓存是否过期
             cache_ts = _client_name_cache_ts.get(cache_key, 0)
             cached = _client_name_cache.get(cache_key)
@@ -507,21 +625,21 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             if cached:
                 client_id, client_name = cached
             else:
-                # 尝试从数据库查找对应的client
+                # 同步DB调用放到线程池执行，避免阻塞事件循环；正/负结果均缓存60秒（负结果也缓存，防未知key每请求打DB）
                 try:
                     from app.database import fetch_one as _fetch_one
-                    key_row = _fetch_one(
-                        "SELECT client_id FROM client_api_keys WHERE key_prefix LIKE %s LIMIT 1",
-                        (f"{api_key_prefix}%",),
+                    key_row = await asyncio.to_thread(
+                        _fetch_one,
+                        "SELECT k.client_id, c.name "
+                        "FROM client_api_keys k LEFT JOIN clients c ON c.id = k.client_id "
+                        "WHERE k.key_hash = %s LIMIT 1",
+                        (key_hash,),
                     )
                     if key_row:
-                        client_id = key_row["client_id"]
-                        client_row = _fetch_one("SELECT name FROM clients WHERE id = %s", (client_id,))
-                        if client_row:
-                            client_name = client_row["name"]
-                        # 缓存 60 秒
-                        _client_name_cache[cache_key] = (client_id, client_name)
-                        _client_name_cache_ts[cache_key] = time.time()
+                        client_id = key_row["client_id"] or ""
+                        client_name = key_row["name"] or ""
+                    _client_name_cache[cache_key] = (client_id, client_name)
+                    _client_name_cache_ts[cache_key] = time.time()
                 except Exception:
                     pass
 
@@ -542,7 +660,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "status_code": response_status,
                 "latency_ms": latency_ms,
                 "latency_us": latency_us,
-                "is_stream": 1 if request_body and '"stream":true' in request_body.replace(" ", "") else 0,
+                "is_stream": 1 if request_body and re.search(r'"stream"\s*:\s*true', request_body) else 0,
                 "error_msg": error_detail or "",
                 "request_path": path,
                 "http_method": http_method,

@@ -2,16 +2,44 @@
 用户平台 SQLAdmin 管理面板
 
 提供数据库表的 Web 管理界面，挂载于 /platform/dbadmin。
-使用与网关相同的管理员密码进行认证。
+密码契约（与网关/平台管理后台一致）：
+优先 ACU_ADMIN_PASSWORD_HASH(bcrypt)，否则 ACU_ADMIN_PASSWORD(constant-time比较)；
+两者均未配置时拒绝一切登录。
 """
+import hmac
+import logging
 import os
 
+import bcrypt
 from sqladmin import Admin, ModelView
 from sqladmin.authentication import AuthenticationBackend
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
 
 from app.db_async import async_engine
+
+logger = logging.getLogger("aqua.admin_panel")
+
+_ADMIN_PASSWORD_HASH = os.environ.get("ACU_ADMIN_PASSWORD_HASH", "")
+_ADMIN_PASSWORD = os.environ.get("ACU_ADMIN_PASSWORD", "")
+if not _ADMIN_PASSWORD_HASH and not _ADMIN_PASSWORD:
+    logger.critical(
+        "[FATAL] ACU_ADMIN_PASSWORD_HASH 与 ACU_ADMIN_PASSWORD 均未配置，SQLAdmin 面板将拒绝一切登录！"
+    )
+
+
+def _verify_admin_password(password: str) -> bool:
+    """管理密码校验：优先bcrypt哈希，否则constant-time明文比较；均未配置/空密码一律拒绝"""
+    if not password:
+        return False
+    if _ADMIN_PASSWORD_HASH:
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), _ADMIN_PASSWORD_HASH.encode("utf-8"))
+        except (ValueError, TypeError):
+            return False
+    if _ADMIN_PASSWORD:
+        return hmac.compare_digest(password, _ADMIN_PASSWORD)
+    return False
 from app.models import (
     User,
     Session,
@@ -28,14 +56,15 @@ from app.models import (
 # ========== 认证后端 ==========
 
 class AdminAuth(AuthenticationBackend):
-    """SQLAdmin 认证：使用 ACU_ADMIN_PASSWORD 环境变量"""
+    """SQLAdmin 认证：与平台管理后台共用管理密码契约（HASH优先/constant-time/未配置拒绝）"""
 
     async def login(self, request: Request) -> bool:
         form = await request.form()
-        username = form.get("username", "")
         password = form.get("password", "")
-        admin_password = os.environ.get("ACU_ADMIN_PASSWORD", "")
-        if password == admin_password:
+        # 修复：原实现未配置密码时空密码即可登录（"" == ""）
+        # bcrypt校验（12 rounds）经线程池执行，避免阻塞事件循环
+        import asyncio
+        if await asyncio.to_thread(_verify_admin_password, password):
             request.session.update({"authenticated": True})
             return True
         return False

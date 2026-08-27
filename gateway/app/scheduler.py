@@ -42,6 +42,7 @@ SurgeScheduler v10.0 - 浪涌调度器核心
 """
 import asyncio
 import logging
+import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -58,40 +59,34 @@ logger = logging.getLogger("acu.scheduler")
 # ========== 模型特性配置 ==========
 
 # 慢速模型（首字节延迟高，需要更长超时）
-# 仅包含实测可用的模型
+# v10.1修复：常量漂移——修正为 nim_models.NIM_MODEL_CATALOG 中实际存在的模型id
+# （原 z-ai/glm-5.2、minimax-m2.7、qwen3.5-397b-a17b 均不在目录中，已删除）
 SLOW_MODELS = {
-    "z-ai/glm-5.2",
     "minimaxai/minimax-m3",
-    "minimaxai/minimax-m2.7",
-    "qwen/qwen3.5-397b-a17b",
     "nvidia/nemotron-3-ultra-550b-a55b",
 }
 
 # 慢速模型差异化切换阈值（统一38，确保所有模型容量一致）
-# 仅包含实测可用的模型
+# 键与 SLOW_MODELS 保持一致，且均存在于 NIM_MODEL_CATALOG
 SLOW_MODEL_THRESHOLDS = {
-    "z-ai/glm-5.2": 38,
     "minimaxai/minimax-m3": 38,
-    "minimaxai/minimax-m2.7": 38,
-    "qwen/qwen3.5-397b-a17b": 38,
     "nvidia/nemotron-3-ultra-550b-a55b": 38,
 }
 
 # 推理模型（返回 reasoning_content 字段）
+# v10.1修复：deepseek-v4-pro 修正为目录中的 deepseek-v4-pro-0813；
+# deepseek-v4-flash 目录中无同家族替代，已删除
 REASONING_MODELS = {
-    "deepseek-ai/deepseek-v4-flash",
-    "deepseek-ai/deepseek-v4-pro",
+    "deepseek-ai/deepseek-v4-pro-0813",
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
 }
 
 # 模型默认参数（基于NVIDIA NIM使用示例）
+# v10.1修复：所有键均修正为 NIM_MODEL_CATALOG 中实际存在的模型id
 MODEL_DEFAULTS = {
-    "z-ai/glm-5.2": {"temperature": 1, "top_p": 1, "max_tokens": 16384},
     "minimaxai/minimax-m3": {"temperature": 1.0, "top_p": 0.95, "max_tokens": 8192},
-    "minimaxai/minimax-m2.7": {"temperature": 1.0, "top_p": 0.95, "max_tokens": 8192},
-    "deepseek-ai/deepseek-v4-pro": {"temperature": 1, "top_p": 0.95, "max_tokens": 16384},
-    "deepseek-ai/deepseek-v4-flash": {"temperature": 1, "top_p": 0.95, "max_tokens": 16384},
+    "deepseek-ai/deepseek-v4-pro-0813": {"temperature": 1, "top_p": 0.95, "max_tokens": 16384},
 }
 
 # 超时配置
@@ -240,7 +235,7 @@ class ClientMetrics:
     inflight_count: int = 0  # 算法5：当前并发数
     # v9.2: 毫秒级精准追踪 - 记录每个并发请求的开始时间戳
     # 用于超时检测和高精度并发计算
-    inflight_timestamps: list = field(default_factory=list)  # [start_time, ...]
+    inflight_timestamps: list = field(default_factory=list)  # [(start_time, request_id), ...]
     burst_timestamps: deque = field(default_factory=lambda: deque(maxlen=200))  # 算法6：突发检测（扩大容量）
     daily_count: int = 0  # 算法7：日用量
     daily_reset_at: float = 0.0
@@ -256,24 +251,36 @@ class ClientMetrics:
             self.burst_timestamps.popleft()
         return len(self.burst_timestamps)
 
-    def record_inflight_start(self) -> float:
-        """记录并发请求开始，返回开始时间戳（毫秒精度）"""
+    def record_inflight_start(self, request_id: str = None) -> float:
+        """记录并发请求开始，返回开始时间戳（毫秒精度）
+
+        v10.1修复：存储 (start_time, request_id) 元组，end 时按 request_id 精确匹配，
+        避免并发下总是弹出最旧时间戳导致耗时统计错配
+        """
         now = time.time()
         self.inflight_count += 1
-        self.inflight_timestamps.append(now)
+        self.inflight_timestamps.append((now, request_id))
         return now
 
-    def record_inflight_end(self) -> float:
+    def record_inflight_end(self, request_id: str = None) -> float:
         """
         记录并发请求结束。
-        自动清理超时的陈旧请求记录。
+        优先按 request_id 匹配移除对应记录；未提供 request_id 时兼容旧调用（弹出最早一条）。
         返回本次请求的耗时（秒）。
         """
         now = time.time()
         self.inflight_count = max(0, self.inflight_count - 1)
-        # 清理最早的一个时间戳
         if self.inflight_timestamps:
-            start = self.inflight_timestamps.pop(0)
+            start = None
+            if request_id is not None:
+                # 按请求ID精确匹配移除
+                for i, (ts, rid) in enumerate(self.inflight_timestamps):
+                    if rid == request_id:
+                        start = self.inflight_timestamps.pop(i)[0]
+                        break
+            if start is None:
+                # 兼容旧调用：弹出最早的记录
+                start = self.inflight_timestamps.pop(0)[0]
             return now - start
         return 0.0
 
@@ -284,8 +291,8 @@ class ClientMetrics:
         """
         now = time.time()
         stale_count = 0
-        # 从前往后清理超时的陈旧的请求
-        while self.inflight_timestamps and (now - self.inflight_timestamps[0]) > CONCURRENCY_REQUEST_TIMEOUT:
+        # 从前往后清理超时的陈旧的请求（元素为 (start_time, request_id) 元组）
+        while self.inflight_timestamps and (now - self.inflight_timestamps[0][0]) > CONCURRENCY_REQUEST_TIMEOUT:
             self.inflight_timestamps.pop(0)
             self.inflight_count = max(0, self.inflight_count - 1)
             stale_count += 1
@@ -326,8 +333,9 @@ class SurgeScheduler:
     4. 后台任务只操作桶级字段
     """
 
-    POOL_MAX_CONNECTIONS = 300
-    POOL_MAX_KEEPALIVE = 150
+    # HTTP连接池上限（调优：300/150过大易压垮上游，收敛为100/20，keepalive 60s）
+    POOL_MAX_CONNECTIONS = 100
+    POOL_MAX_KEEPALIVE = 20
 
     # 活跃密钥缓存TTL（秒）
     ACTIVE_KEYS_CACHE_TTL = 30.0
@@ -430,10 +438,12 @@ class SurgeScheduler:
         # === 健康密钥计数（算法14用） ===
         self._healthy_key_count = 0
 
-        # === 客户端密钥缓存（30秒TTL，减少 authenticate_client 的DB查询） ===
-        self._client_key_cache: Dict[str, dict] = {}
-        self._client_key_cache_time: float = 0.0
+        # === 客户端密钥缓存（逐条30秒TTL，减少 authenticate_client 的DB查询） ===
+        # v10.1修复：原"全局滑动TTL"（任一条写入刷新全部寿命）导致只要有一个
+        # 活跃客户端，被吊销密钥的缓存就永不过期。改为逐条过期 + 条目上限
+        self._client_key_cache: Dict[str, tuple] = {}  # key_hash -> (client_info, expires_at)
         self.CLIENT_KEY_CACHE_TTL = 30.0
+        self.CLIENT_KEY_CACHE_MAX_ENTRIES = 2048  # 条目上限，超限淘汰最旧
 
         # === 上游键名称缓存（减少 get_algorithm_detail 的DB查询） ===
         self._upstream_key_names: Dict[str, str] = {}
@@ -462,9 +472,13 @@ class SurgeScheduler:
 
         # === 失效密钥自动检测器 ===
         # v10.0: 连续5次密钥认证失败自动停用，避免死密钥消耗调度资源
+        # v10.1修复: 记录停用时间戳（原存reason字符串无恢复路径），
+        # _recheck_auto_deactivated 每30分钟对停用超30分钟的key探活，成功自动恢复
         self._key_consecutive_auth_fail: Dict[str, int] = {}  # key_id -> 连续403/401计数
-        self._auto_deactivated_keys: Dict[str, str] = {}  # key_id -> reason (已自动停用的密钥)
+        self._auto_deactivated_keys: Dict[str, float] = {}  # key_id -> 停用时间戳
         self._AUTH_FAIL_DEACTIVATE_THRESHOLD = 5  # 连续5次认证失败自动停用
+        self.AUTO_DEACTIVATE_RECHECK_SECONDS = 1800  # 停用30分钟后开始复检
+        self._last_auto_deactivated_recheck: float = 0.0
 
         # === 系统资源监控（内存感知调度） ===
         self._memory_pressure: float = 0.0  # 0.0~1.0 内存压力系数
@@ -584,6 +598,11 @@ class SurgeScheduler:
         self._key_cache.pop(key_id, None)
         self._key_cache_timestamps.pop(key_id, None)
 
+    def _upstream_models_url(self) -> str:
+        """上游模型列表探活地址（v10.1修复：base_url 可经管理后台配置，不再硬编码）"""
+        base = get_setting("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+        return base.rstrip("/") + "/models"
+
     def _cleanup_expired_key_cache(self):
         """清理所有过期的密钥缓存条目（后台定期调用）"""
         now = time.time()
@@ -622,26 +641,28 @@ class SurgeScheduler:
     async def _ensure_pools(self):
         """确保连接池已创建"""
         if self._http_pool is None or self._http_pool.is_closed:
+            # 非流式池：limits 显式化；超时分项显式（connect=10/read=120），
+            # 热路径请求均带 per-request timeout 覆盖（180s/慢模型300s），此处为兜底
             limits = httpx.Limits(
                 max_connections=self.POOL_MAX_CONNECTIONS,
                 max_keepalive_connections=self.POOL_MAX_KEEPALIVE,
-                keepalive_expiry=120,
+                keepalive_expiry=60,
             )
             self._http_pool = httpx.AsyncClient(
-                timeout=httpx.Timeout(DEFAULT_TIMEOUT),
+                timeout=httpx.Timeout(120.0, connect=10.0),
                 limits=limits,
                 http2=False,
             )
         if self._stream_pool is None or self._stream_pool.is_closed:
+            # 流式池：limits 与非流式一致；read=600 大于 per-chunk 空闲超时180秒，
+            # 让 per-chunk 空闲检测先于 httpx 超时触发，确保优雅终止
             stream_limits = httpx.Limits(
                 max_connections=self.POOL_MAX_CONNECTIONS,
                 max_keepalive_connections=self.POOL_MAX_KEEPALIVE,
-                keepalive_expiry=120,
+                keepalive_expiry=60,
             )
-            # 连接池超时设置为600秒（大于per-chunk空闲超时180秒）
-            # 让per-chunk空闲检测先于httpx超时触发，确保优雅终止
             self._stream_pool = httpx.AsyncClient(
-                timeout=httpx.Timeout(600.0, connect=30.0),
+                timeout=httpx.Timeout(600.0, connect=10.0, read=600.0),
                 limits=stream_limits,
                 http2=False,
             )
@@ -743,18 +764,23 @@ class SurgeScheduler:
 
         # === 失效密钥自动检测 ===
         # v10.0: 连续5次认证失败自动停用，从调度池移除
+        # v10.1修复: 记录停用时间戳；UPDATE后立即失效活跃密钥缓存（原实现缓存30秒内仍读到已停用密钥）
         if not success and (status_code == 403 or status_code == 401):
             self._key_consecutive_auth_fail[key_id] = self._key_consecutive_auth_fail.get(key_id, 0) + 1
             count = self._key_consecutive_auth_fail[key_id]
             if count >= self._AUTH_FAIL_DEACTIVATE_THRESHOLD > 0 and key_id not in self._auto_deactivated_keys:
-                self._auto_deactivated_keys[key_id] = f"连续{count}次认证失败自动停用"
-                # 同步更新数据库
-                try:
-                    from app.database import execute as db_exec, utcnow
-                    db_exec("UPDATE upstream_keys SET status = 'inactive' WHERE id = %s AND status = 'active'", (key_id,))
-                    logger.warning(f"密钥自动停用: key={key_id[:8]} 连续{count}次认证失败，已标记为inactive")
-                except Exception as e:
-                    logger.error(f"密钥自动停用数据库更新失败: {e}")
+                self._auto_deactivated_keys[key_id] = time.time()
+                # 数据库落库改为后台线程执行：本方法直接运行在事件循环内，
+                # 同步UPDATE会阻塞所有在途请求（落库+失效缓存打包进线程，保持先后顺序）
+                def _deactivate_db(kid=key_id, fail_count=count):
+                    try:
+                        from app.database import execute as db_exec
+                        db_exec("UPDATE upstream_keys SET status = 'inactive' WHERE id = %s AND status = 'active'", (kid,))
+                        self.invalidate_active_keys_cache()  # 立即失效密钥缓存
+                        logger.warning(f"密钥自动停用: key={kid[:8]} 连续{fail_count}次认证失败，已标记为inactive({self.AUTO_DEACTIVATE_RECHECK_SECONDS // 60}分钟后自动复检)")
+                    except Exception as e:
+                        logger.error(f"密钥自动停用数据库更新失败: {e}")
+                threading.Thread(target=_deactivate_db, daemon=True).start()
             else:
                 logger.debug(f"密钥认证失败记录: key={key_id[:8]} consecutive={count}/{self._AUTH_FAIL_DEACTIVATE_THRESHOLD}")
         elif success:
@@ -1394,13 +1420,16 @@ class SurgeScheduler:
 
     # ========== 客户端治理（算法5/6/7，只监测不拦截） ==========
 
-    def record_client_request(self, client_id: str, model: str):
-        """记录客户端请求（算法5/6/7数据采集 + v9.2毫秒级并发追踪）"""
+    def record_client_request(self, client_id: str, model: str, request_id: str = None):
+        """记录客户端请求（算法5/6/7数据采集 + v9.2毫秒级并发追踪）
+
+        request_id 可选：传入后 record_inflight 按请求精确匹配释放
+        """
         metrics = self._client_metrics[client_id]
         now = time.time()
 
         # v9.2: 毫秒级精准并发追踪
-        metrics.record_inflight_start()
+        metrics.record_inflight_start(request_id)
         # 同时清理超时的陈旧请求
         metrics.cleanup_stale_inflight()
 
@@ -1428,10 +1457,10 @@ class SurgeScheduler:
             metrics.model_switches.append((now, model))
         metrics.last_model = model
 
-    def release_client_request(self, client_id: str):
-        """释放客户端并发计数（v9.2 毫秒级精准释放）"""
+    def release_client_request(self, client_id: str, request_id: str = None):
+        """释放客户端并发计数（v9.2 毫秒级精准释放；request_id 可选用于精确匹配）"""
         metrics = self._client_metrics[client_id]
-        elapsed = metrics.record_inflight_end()
+        elapsed = metrics.record_inflight_end(request_id)
         # 如果释放时间异常短（<100ms），可能是错误路径，记录日志
         if elapsed > 0 and elapsed < 0.1:
             logger.debug(f"快速释放请求: client={client_id[:8]} elapsed={elapsed:.3f}s")
@@ -1464,11 +1493,11 @@ class SurgeScheduler:
         # 先清理超时请求
         real_current = metrics.get_real_inflight_count()
 
-        # 计算峰值（取所有时间戳的最大并发数）
+        # 计算峰值（取所有时间戳的最大并发数；元素为 (start_time, request_id) 元组）
         peak = 0
         ts_copy = list(metrics.inflight_timestamps)
         for i in range(len(ts_copy)):
-            count = len([t for t in ts_copy[i:] if t > 0])
+            count = len([t for t in ts_copy[i:] if t[0] > 0])
             peak = max(peak, count)
 
         if limit == 0:
@@ -2365,14 +2394,16 @@ class SurgeScheduler:
         if valid_models is None:
             # 首次运行时获取有效模型列表
             try:
-                # 使用缓存的密钥获取模型列表
-                active_keys = self._get_active_keys()
+                # 使用缓存的密钥获取模型列表（DB读取/密钥解密均含同步查库，经线程池执行）
+                active_keys = await asyncio.to_thread(self._get_active_keys)
                 if active_keys:
-                    api_key = self._ensure_key_cached(active_keys[0]["id"], active_keys[0]["api_key_ciphertext"])
+                    api_key = await asyncio.to_thread(
+                        self._ensure_key_cached, active_keys[0]["id"], active_keys[0]["api_key_ciphertext"]
+                    )
                     if api_key:
                         await self._ensure_pools()
                         resp = await self._http_pool.get(
-                            "https://integrate.api.nvidia.com/v1/models",
+                            await asyncio.to_thread(self._upstream_models_url),
                             headers={"Authorization": f"Bearer {api_key}"},
                             timeout=httpx.Timeout(10.0)
                         )
@@ -2425,7 +2456,8 @@ class SurgeScheduler:
             return
         self._last_health_check = now
 
-        active_keys = self._get_active_keys()
+        # DB读取（活跃密钥，含5秒缓存）经线程池执行，避免阻塞事件循环
+        active_keys = await asyncio.to_thread(self._get_active_keys)
         if not active_keys:
             return
 
@@ -2444,14 +2476,14 @@ class SurgeScheduler:
             if key_id in self._auto_deactivated_keys:
                 continue
 
-            api_key = self._ensure_key_cached(key_id, key_row["api_key_ciphertext"])
+            api_key = await asyncio.to_thread(self._ensure_key_cached, key_id, key_row["api_key_ciphertext"])
             if not api_key:
                 continue
 
             try:
                 await self._ensure_pools()
                 resp = await self._http_pool.get(
-                    "https://integrate.api.nvidia.com/v1/models",
+                    await asyncio.to_thread(self._upstream_models_url),
                     headers={"Authorization": f"Bearer {api_key}"},
                     timeout=httpx.Timeout(8.0),
                 )
@@ -2464,10 +2496,16 @@ class SurgeScheduler:
                     count = self._key_consecutive_auth_fail.get(key_id, 0) + 3  # 健康检查权重更高
                     self._key_consecutive_auth_fail[key_id] = count
                     if count >= self._AUTH_FAIL_DEACTIVATE_THRESHOLD:
-                        self._auto_deactivated_keys[key_id] = f"健康检查: 连续认证失败(总分{count})"
+                        self._auto_deactivated_keys[key_id] = time.time()
+                        # 停用落库经线程池执行，避免健康检查（事件循环内）同步写库阻塞
                         try:
                             from app.database import execute as db_exec
-                            db_exec("UPDATE upstream_keys SET status = 'inactive' WHERE id = %s AND status = 'active'", (key_id,))
+                            await asyncio.to_thread(
+                                db_exec,
+                                "UPDATE upstream_keys SET status = 'inactive' WHERE id = %s AND status = 'active'",
+                                (key_id,),
+                            )
+                            self.invalidate_active_keys_cache()  # v10.1修复: 立即失效密钥缓存
                             logger.warning(f"健康检查停用密钥: key={key_id[:8]} 认证失败，已标记为inactive")
                         except Exception as e:
                             logger.error(f"健康检查停用密钥数据库更新失败: {e}")
@@ -2477,6 +2515,61 @@ class SurgeScheduler:
                     logger.debug(f"密钥健康检查异常: key={key_id[:8]} status={resp.status_code}")
             except Exception as e:
                 logger.debug(f"密钥健康检查请求异常: key={key_id[:8]} error={e}")
+
+    def _recheck_auto_deactivated(self):
+        """自动停用密钥定期复检（v10.1新增：自动停用的恢复路径，防自砖）
+
+        对停用超过30分钟的自动停用密钥做轻量探活（GET {base_url}/models，
+        携带该密钥的 Authorization），成功则恢复 status='active' 并清缓存。
+        注意：本方法使用同步 httpx，必须通过 asyncio.to_thread 调度执行，
+        不得直接在事件循环中调用。
+        """
+        if not self._auto_deactivated_keys:
+            return
+        now = time.time()
+        candidates = [
+            kid for kid, deactivated_at in self._auto_deactivated_keys.items()
+            if now - deactivated_at >= self.AUTO_DEACTIVATE_RECHECK_SECONDS
+        ]
+        if not candidates:
+            return
+
+        models_url = self._upstream_models_url()
+        for key_id in candidates:
+            row = fetch_one(
+                "SELECT id, api_key_ciphertext FROM upstream_keys WHERE id = %s",
+                (key_id,),
+            )
+            if row is None:
+                # 密钥已被删除，移除追踪
+                self._auto_deactivated_keys.pop(key_id, None)
+                continue
+            api_key = self._ensure_key_cached(key_id, row.get("api_key_ciphertext"))
+            if not api_key:
+                continue
+            try:
+                resp = httpx.get(
+                    models_url,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=8.0,
+                )
+                if resp.status_code == 200:
+                    execute(
+                        "UPDATE upstream_keys SET status = 'active' WHERE id = %s AND status = 'inactive'",
+                        (key_id,),
+                    )
+                    self._auto_deactivated_keys.pop(key_id, None)
+                    self._key_consecutive_auth_fail.pop(key_id, None)
+                    self.invalidate_active_keys_cache()
+                    logger.info(f"自动停用密钥探活成功已恢复: key={key_id[:8]} 重新标记为active")
+                elif resp.status_code in (401, 403):
+                    # 密钥仍无效：刷新停用时间戳，等待下个复检周期
+                    self._auto_deactivated_keys[key_id] = now
+                    logger.debug(f"自动停用密钥复检仍失败: key={key_id[:8]} status={resp.status_code}")
+                else:
+                    logger.debug(f"自动停用密钥复检状态异常: key={key_id[:8]} status={resp.status_code}")
+            except Exception as e:
+                logger.debug(f"自动停用密钥复检请求异常: key={key_id[:8]} error={e}")
 
     # ========== 后台任务入口 ==========
 
@@ -2514,7 +2607,7 @@ class SurgeScheduler:
         elif is_critical:
             # 临界压力下立即触发日志清理释放磁盘空间
             logger.warning("系统内存临界，触发紧急日志清理")
-            self._run_log_cleanup()
+            await self._run_log_cleanup()
 
         # 效模型桶（模型不存在于上游NVIDIA NIM）
         await self._cleanup_invalid_model_buckets()
@@ -2522,34 +2615,61 @@ class SurgeScheduler:
         # v10.0：主动密钥健康检查（每30秒测试一批密钥）
         await self._proactive_key_health_check()
 
+        # v10.1修复：自动停用密钥定期复检（每30分钟，线程中运行避免阻塞事件循环）
+        now = time.time()
+        if now - self._last_auto_deactivated_recheck >= self.AUTO_DEACTIVATE_RECHECK_SECONDS:
+            self._last_auto_deactivated_recheck = now
+            await asyncio.to_thread(self._recheck_auto_deactivated)
+
         # 数据库日志自动清理（每6小时执行一次，内存节约模式每1小时）
         self._cleanup_counter += 1
         effective_interval = self.CLEANUP_INTERVAL_CYCLES // 6 if self._memory_saving_mode else self.CLEANUP_INTERVAL_CYCLES
         if self._cleanup_counter >= effective_interval:
             self._cleanup_counter = 0
-            self._run_log_cleanup()
+            await self._run_log_cleanup()
 
 
     # ========== 客户端密钥缓存 ==========
 
     def get_client_key_cache(self, key_hash: str) -> Optional[dict]:
-        """获取缓存的客户端密钥信息，若过期则返回 None"""
-        now = time.time()
-        if now - self._client_key_cache_time > self.CLIENT_KEY_CACHE_TTL:
+        """获取缓存的客户端密钥信息（v10.1修复：逐条校验自身TTL，过期返回 None）"""
+        entry = self._client_key_cache.get(key_hash)
+        if entry is None:
             return None
-        return self._client_key_cache.get(key_hash)
+        client_info, expires_at = entry
+        if time.time() >= expires_at:
+            self._client_key_cache.pop(key_hash, None)
+            return None
+        return client_info
 
     def set_client_key_cache(self, key_hash: str, client_info: dict) -> None:
-        """缓存客户端密钥信息并更新时间戳"""
-        self._client_key_cache[key_hash] = client_info
-        self._client_key_cache_time = time.time()
+        """缓存客户端密钥信息（30秒逐条TTL；超过上限时淘汰最旧条目）"""
+        now = time.time()
+        self._client_key_cache[key_hash] = (client_info, now + self.CLIENT_KEY_CACHE_TTL)
+        if len(self._client_key_cache) > self.CLIENT_KEY_CACHE_MAX_ENTRIES:
+            oldest = min(self._client_key_cache, key=lambda k: self._client_key_cache[k][1])
+            self._client_key_cache.pop(oldest, None)
 
-    def _run_log_cleanup(self):
-        """每6小时自动清理过期请求日志，防止DB无限膨胀"""
+    def invalidate_client_key_cache(self, key_hash: str = None):
+        """使客户端密钥缓存失效（契约方法：密钥吊销/禁用时由管理后台调用）
+
+        - key_hash=None：清空全部缓存
+        - 指定 key_hash：仅清除该条
+        """
+        if key_hash is None:
+            self._client_key_cache.clear()
+        else:
+            self._client_key_cache.pop(key_hash, None)
+
+    async def _run_log_cleanup(self):
+        """每6小时自动清理过期请求日志，防止DB无限膨胀
+
+        v10.1修复：COUNT+DELETE+VACUUM 为阻塞操作，放入工作线程执行避免卡事件循环
+        """
         import logging
         try:
             from app.database import cleanup_success_logs
-            result = cleanup_success_logs(keep_days=3, keep_error_days=90)
+            result = await asyncio.to_thread(cleanup_success_logs, keep_days=3, keep_error_days=90)
             logger = logging.getLogger("acu.scheduler")
             if result.get("success_deleted", 0) > 0 or result.get("error_deleted", 0) > 0:
                 logger.info(f"定时日志清理: 成功{result['success_deleted']}条, 错误{result['error_deleted']}条")

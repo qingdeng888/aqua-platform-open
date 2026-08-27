@@ -14,6 +14,7 @@ import json
 import re
 import time
 import logging
+from datetime import datetime, timezone  # 修复：parse_retry_after 用到 datetime.now(timezone.utc) 但原先未导入（NameError）
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 

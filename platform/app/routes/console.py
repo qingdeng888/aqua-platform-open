@@ -1,4 +1,5 @@
 """用户控制台路由 - 密钥管理/用量统计/请求日志/个人设置"""
+import asyncio
 import logging
 import os
 import psycopg2
@@ -14,6 +15,7 @@ from app.database import execute, fetch_one, fetch_all, utcnow, today_start_utc,
 from app.security import generate_uuid
 from app.gateway_client import GatewayClient
 from app.routes.auth import get_current_user
+from app.routes.platform_admin import require_admin
 
 router = APIRouter(prefix="/api/user", tags=["用户控制台"])
 
@@ -223,7 +225,8 @@ async def get_usage_limits(request: Request):
 async def list_keys(request: Request):
     """列出用户API密钥"""
     user = await get_current_user(request)
-    keys = fetch_all(
+    keys = await asyncio.to_thread(
+        fetch_all,
         """SELECT id, key_prefix, label, status, created_at
            FROM user_api_keys WHERE user_id=%s ORDER BY created_at DESC""",
         (user["id"],),
@@ -237,7 +240,8 @@ async def create_key(req: CreateKeyRequest, request: Request):
     user = await get_current_user(request)
 
     # 检查密钥数量限制(仅计算活跃密钥)
-    existing = fetch_all(
+    existing = await asyncio.to_thread(
+        fetch_all,
         "SELECT id FROM user_api_keys WHERE user_id=%s AND status='active'",
         (user["id"],),
     )
@@ -245,7 +249,8 @@ async def create_key(req: CreateKeyRequest, request: Request):
         _error_response("最多只能创建5个API密钥", "forbidden", "key_limit_reached", 403)
 
     # 获取用户的gw_client_id（优先从users表获取，其次从密钥表获取）
-    user_gw_client = user.get("gw_client_id", "") or fetch_one(
+    user_gw_client = user.get("gw_client_id", "") or await asyncio.to_thread(
+        fetch_one,
         "SELECT gw_client_id FROM user_api_keys WHERE user_id=%s AND gw_client_id != '' LIMIT 1",
         (user["id"],),
     )
@@ -273,7 +278,7 @@ async def create_key(req: CreateKeyRequest, request: Request):
             if not gw_client_id:
                 _error_response("创建网关客户端失败", "server_error", "gateway_client_failed", 500)
             # 保存到users表
-            execute("UPDATE users SET gw_client_id=%s WHERE id=%s", (gw_client_id, user["id"]))
+            await asyncio.to_thread(execute, "UPDATE users SET gw_client_id=%s WHERE id=%s", (gw_client_id, user["id"]))
         except Exception as e:
             _error_response(f"创建网关客户端失败: {e}", "server_error", "gateway_client_failed", 500)
 
@@ -298,7 +303,8 @@ async def create_key(req: CreateKeyRequest, request: Request):
     now = utcnow()
     record_id = generate_uuid()
     try:
-        execute(
+        await asyncio.to_thread(
+            execute,
             """INSERT INTO user_api_keys (id, user_id, gw_client_id, gw_key_id, key_prefix, label, status, created_at, api_key_encrypted)
                VALUES (%s, %s, %s, %s, %s, %s, 'active', %s, %s)""",
             (record_id, user["id"], gw_client_id, gw_key_id, key_prefix, req.label, now, api_key_encrypted),
@@ -326,7 +332,8 @@ async def create_key(req: CreateKeyRequest, request: Request):
 async def reveal_key(key_id: str, request: Request):
     """解密并返回完整API密钥（用户点击"小眼睛"时调用）"""
     user = await get_current_user(request)
-    key_row = fetch_one(
+    key_row = await asyncio.to_thread(
+        fetch_one,
         "SELECT id, api_key_encrypted, key_prefix, user_id, status, gw_client_id, gw_key_id FROM user_api_keys WHERE id=%s AND user_id=%s",
         (key_id, user["id"]),
     )
@@ -352,7 +359,7 @@ async def reveal_key(key_id: str, request: Request):
                 # 回填本地加密存储
                 from app.routes.chat import encrypt_api_key
                 encrypted = encrypt_api_key(full_key)
-                execute("UPDATE user_api_keys SET api_key_encrypted=%s WHERE id=%s", (encrypted, key_id))
+                await asyncio.to_thread(execute, "UPDATE user_api_keys SET api_key_encrypted=%s WHERE id=%s", (encrypted, key_id))
                 logger.info(f"密钥回填成功: key_id={key_id}")
         except Exception as e:
             logger.error(f"网关密钥回填失败: {e}")
@@ -368,7 +375,8 @@ async def reveal_key(key_id: str, request: Request):
 async def toggle_key_status(key_id: str, request: Request):
     """启用/禁用API密钥"""
     user = await get_current_user(request)
-    key_row = fetch_one(
+    key_row = await asyncio.to_thread(
+        fetch_one,
         "SELECT id, gw_client_id, gw_key_id, status FROM user_api_keys WHERE id=%s AND user_id=%s",
         (key_id, user["id"]),
     )
@@ -385,7 +393,8 @@ async def toggle_key_status(key_id: str, request: Request):
             logger.warning(f"网关停用密钥失败: {e}")
     elif current_status == "revoked":
         # 检查活跃密钥数量
-        active_count = fetch_one(
+        active_count = await asyncio.to_thread(
+            fetch_one,
             "SELECT COUNT(*) as cnt FROM user_api_keys WHERE user_id=%s AND status='active'",
             (user["id"],),
         )
@@ -401,7 +410,7 @@ async def toggle_key_status(key_id: str, request: Request):
         _error_response(f"无法切换密钥状态: {current_status}", "invalid_request", "invalid_status", 400)
 
     now = utcnow()
-    execute("UPDATE user_api_keys SET status=%s WHERE id=%s", (new_status, key_id))
+    await asyncio.to_thread(execute, "UPDATE user_api_keys SET status=%s WHERE id=%s", (new_status, key_id))
     return {"id": key_id, "status": new_status, "message": f"密钥已{'启用' if new_status == 'active' else '停用'}"}
 
 
@@ -411,7 +420,8 @@ async def delete_key(key_id: str, request: Request):
     user = await get_current_user(request)
 
     # 查找key记录，验证属于当前用户
-    key_row = fetch_one(
+    key_row = await asyncio.to_thread(
+        fetch_one,
         "SELECT * FROM user_api_keys WHERE id=%s AND user_id=%s",
         (key_id, user["id"]),
     )
@@ -425,7 +435,7 @@ async def delete_key(key_id: str, request: Request):
         pass  # 即使网关删除失败，本地也删除
 
     # 删除本地记录
-    execute("DELETE FROM user_api_keys WHERE id=%s", (key_id,))
+    await asyncio.to_thread(execute, "DELETE FROM user_api_keys WHERE id=%s", (key_id,))
 
     return {"message": "密钥已删除"}
 
@@ -438,7 +448,8 @@ async def get_stats(request: Request):
     gw_client_id = user.get("gw_client_id", "")
     if not gw_client_id:
         # 没有网关客户端ID，从密钥表获取
-        key_row = fetch_one(
+        key_row = await asyncio.to_thread(
+            fetch_one,
             "SELECT gw_client_id FROM user_api_keys WHERE user_id=%s AND gw_client_id != '' LIMIT 1",
             (user["id"],),
         )
@@ -459,7 +470,8 @@ async def get_stats(request: Request):
         }
 
     # 今日统计（从Gateway数据库读取）
-    today_stats = _gw_fetch_one(
+    today_stats = await asyncio.to_thread(
+        _gw_fetch_one,
         """SELECT COUNT(*) as total_requests,
                   COALESCE(SUM(total_tokens), 0) as total_tokens,
                   COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
@@ -471,7 +483,8 @@ async def get_stats(request: Request):
     )
 
     # 7天趋势
-    trend_7d = _gw_fetch_all(
+    trend_7d = await asyncio.to_thread(
+        _gw_fetch_all,
         """SELECT (created_at::timestamptz AT TIME ZONE 'UTC' + INTERVAL '8 hours')::date as date, COUNT(*) as request_count,
                   COALESCE(SUM(total_tokens), 0) as token_count
            FROM request_logs
@@ -482,7 +495,8 @@ async def get_stats(request: Request):
     )
 
     # 模型分布（今日）
-    model_distribution = _gw_fetch_all(
+    model_distribution = await asyncio.to_thread(
+        _gw_fetch_all,
         """SELECT model, COUNT(*) as request_count,
                   COALESCE(SUM(total_tokens), 0) as token_count
            FROM request_logs
@@ -519,7 +533,8 @@ async def get_leaderboard(request: Request, limit: int = 20):
     """获取今日全平台用户排行榜（从Gateway数据库实时读取）"""
     today_start = today_start_utc()
 
-    rows = _gw_fetch_all(
+    rows = await asyncio.to_thread(
+        _gw_fetch_all,
         """SELECT
             r.client_id,
             COALESCE(c.name, '未知用户') as client_name,
@@ -542,7 +557,8 @@ async def get_leaderboard(request: Request, limit: int = 20):
     )
 
     # 计算今日全平台总量
-    total_row = _gw_fetch_one(
+    total_row = await asyncio.to_thread(
+        _gw_fetch_one,
         """SELECT COUNT(*) as total_requests,
                   COALESCE(SUM(total_tokens), 0) as total_tokens,
                   COUNT(DISTINCT client_id) as active_users
@@ -609,7 +625,8 @@ async def get_models_status(request: Request):
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
 
     # 从Gateway DB获取最近1小时的模型日志统计
-    rows = _gw_fetch_all(
+    rows = await asyncio.to_thread(
+        _gw_fetch_all,
         "SELECT model, COUNT(*) as total_requests, "
         "SUM(CASE WHEN status_code BETWEEN 200 AND 299 THEN 1 ELSE 0 END) as success_count, "
         "SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as error_count, "
@@ -624,7 +641,8 @@ async def get_models_status(request: Request):
     )
 
     # 今日统计
-    today_rows = _gw_fetch_all(
+    today_rows = await asyncio.to_thread(
+        _gw_fetch_all,
         "SELECT model, COUNT(*) as today_requests, "
         "COALESCE(SUM(total_tokens), 0) as today_tokens "
         "FROM request_logs WHERE created_at >= %s AND model != '' AND model IS NOT NULL "
@@ -751,7 +769,8 @@ async def get_request_logs(request: Request, page: int = 1, page_size: int = 20)
 
     gw_client_id = user.get("gw_client_id", "")
     if not gw_client_id:
-        key_row = fetch_one(
+        key_row = await asyncio.to_thread(
+            fetch_one,
             "SELECT gw_client_id FROM user_api_keys WHERE user_id=%s AND gw_client_id != '' LIMIT 1",
             (user["id"],),
         )
@@ -764,14 +783,16 @@ async def get_request_logs(request: Request, page: int = 1, page_size: int = 20)
     offset = (page - 1) * page_size
 
     # 查询总数
-    total_row = _gw_fetch_one(
+    total_row = await asyncio.to_thread(
+        _gw_fetch_one,
         "SELECT COUNT(*) as total FROM request_logs WHERE client_id=%s",
         (gw_client_id,),
     )
     total = total_row["total"] if total_row else 0
 
     # 查询分页数据（Gateway的字段名与Platform不同）
-    data = _gw_fetch_all(
+    data = await asyncio.to_thread(
+        _gw_fetch_all,
         """SELECT id, model, is_stream, prompt_tokens, completion_tokens,
                   total_tokens, latency_ms,
                   CASE WHEN status_code >= 200 AND status_code < 300 THEN 'success' ELSE 'error' END as status,
@@ -797,7 +818,8 @@ async def update_settings(req: UpdateSettingsRequest, request: Request):
     user = await get_current_user(request)
 
     now = utcnow()
-    execute(
+    await asyncio.to_thread(
+        execute,
         "UPDATE users SET display_name=%s, updated_at=%s WHERE id=%s",
         (req.display_name, now, user["id"]),
     )
@@ -827,7 +849,8 @@ async def submit_feedback(req: FeedbackSubmitRequest, request: Request):
 
     fid = generate_uuid()[:12]
     now = utcnow()
-    execute(
+    await asyncio.to_thread(
+        execute,
         "INSERT INTO feedback (id, user_id, username, email, title, content, category, status, created_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s)",
         (fid, user["id"], user.get("display_name", "") or user.get("username", ""),
@@ -866,12 +889,13 @@ async def get_my_feedback(request: Request, page: int = 1, page_size: int = 20):
     """获取当前用户的反馈列表"""
     user = await get_current_user(request)
     offset = (page - 1) * page_size
-    rows = fetch_all(
+    rows = await asyncio.to_thread(
+        fetch_all,
         "SELECT id, title, content, category, status, reply, created_at "
         "FROM feedback WHERE user_id=%s ORDER BY created_at DESC LIMIT %s OFFSET %s",
         (user["id"], page_size, offset),
     )
-    total_row = fetch_one("SELECT COUNT(*) as total FROM feedback WHERE user_id=%s", (user["id"],))
+    total_row = await asyncio.to_thread(fetch_one, "SELECT COUNT(*) as total FROM feedback WHERE user_id=%s", (user["id"],))
     total = total_row["total"] if total_row else 0
     return {"total": total, "page": page, "page_size": page_size, "data": rows}
 
@@ -882,17 +906,22 @@ async def get_my_feedback(request: Request, page: int = 1, page_size: int = 20):
 
 @router.get("/system/concurrency")
 async def get_concurrency_stats(request: Request):
-    """并发控制器统计数据"""
+    """并发控制器统计数据（平台管理员专用）"""
+    await require_admin(request)  # 系统级数据，仅平台管理员可见
     try:
         from app.concurrency import get_concurrency_controller
         cc = get_concurrency_controller()
         active = cc.get_all_active()
         stats = cc.get_stats()
+        # v11 并发控制器 get_stats 返回 {"limits": {...}}（旧版为 "limit" 标量），兼容两种结构并给默认值
+        limit = stats.get("limit")
+        if limit is None:
+            limit = (stats.get("limits") or {}).get("all", 0)
         return {
-            "limit": stats["limit"],
-            "rejected_total": stats["rejected"],
-            "peak_concurrent": stats["peak"],
-            "active_users_count": stats["active_users"],
+            "limit": limit,
+            "rejected_total": stats.get("rejected", 0),
+            "peak_concurrent": stats.get("peak", 0),
+            "active_users_count": stats.get("active_users", 0),
             "active_users": dict(list(active.items())[:50]),
         }
     except ImportError:
@@ -901,7 +930,8 @@ async def get_concurrency_stats(request: Request):
 
 @router.get("/system/ip-monitor")
 async def get_ip_monitor_stats(request: Request):
-    """IP 监测统计数据"""
+    """IP 监测统计数据（平台管理员专用）"""
+    await require_admin(request)  # 系统级数据，仅平台管理员可见
     try:
         from app.ip_monitor import get_ip_monitor
         monitor = get_ip_monitor()
@@ -912,7 +942,8 @@ async def get_ip_monitor_stats(request: Request):
 
 @router.get("/system/ip-monitor/blocked")
 async def get_blocked_ips(request: Request):
-    """获取被封禁 IP 列表"""
+    """获取被封禁 IP 列表（平台管理员专用）"""
+    await require_admin(request)  # 系统级数据，仅平台管理员可见
     try:
         from app.ip_monitor import get_ip_monitor
         monitor = get_ip_monitor()
@@ -923,7 +954,8 @@ async def get_blocked_ips(request: Request):
 
 @router.get("/system/ip-monitor/anomalies")
 async def get_anomaly_ips(request: Request, min_score: int = 30):
-    """获取异常 IP 列表"""
+    """获取异常 IP 列表（平台管理员专用）"""
+    await require_admin(request)  # 系统级数据，仅平台管理员可见
     try:
         from app.ip_monitor import get_ip_monitor
         monitor = get_ip_monitor()
@@ -934,11 +966,13 @@ async def get_anomaly_ips(request: Request, min_score: int = 30):
 
 @router.post("/system/ip-monitor/unblock")
 async def unblock_ip(request: Request):
-    """解封指定 IP"""
+    """解封指定 IP（平台管理员专用）"""
+    await require_admin(request)  # 敏感操作，仅平台管理员可执行
     body = await request.json()
     ip = body.get("ip", "")
     if not ip:
-        return {"error": "missing ip"}, 400
+        # 修复：原来返回 (dict, 400) 元组会被 FastAPI 当作响应体，HTTP状态仍为200
+        raise HTTPException(status_code=400, detail="missing ip")
     try:
         from app.ip_monitor import get_ip_monitor
         monitor = get_ip_monitor()
@@ -950,17 +984,22 @@ async def unblock_ip(request: Request):
 
 @router.get("/system/user-stats")
 async def get_user_classification_stats(request: Request):
-    """用户分类统计数据（老用户 vs 新用户）"""
+    """用户分类统计数据（平台管理员专用）"""
+    await require_admin(request)  # 经营统计数据，仅平台管理员可见
     try:
-        old_count = fetch_one("SELECT COUNT(*) as cnt FROM users WHERE user_type='old'")["cnt"]
-        new_count = fetch_one("SELECT COUNT(*) as cnt FROM users WHERE user_type='new'")["cnt"]
-        total = (old_count or 0) + (new_count or 0)
+        def _user_stats_sync():
+            # 3条查询整体包一次 to_thread，避免逐条调度
+            old_count = fetch_one("SELECT COUNT(*) as cnt FROM users WHERE user_type='old'")["cnt"]
+            new_count = fetch_one("SELECT COUNT(*) as cnt FROM users WHERE user_type='new'")["cnt"]
+            new_usage = fetch_one(
+                "SELECT COUNT(*) as total, COALESCE(SUM(daily_used), 0) as daily_used_sum, "
+                "AVG(daily_used) as avg_daily_used "
+                "FROM users WHERE user_type='new' AND daily_used > 0"
+            )
+            return old_count, new_count, new_usage
 
-        new_usage = fetch_one(
-            "SELECT COUNT(*) as total, COALESCE(SUM(daily_used), 0) as daily_used_sum, "
-            "AVG(daily_used) as avg_daily_used "
-            "FROM users WHERE user_type='new' AND daily_used > 0"
-        )
+        old_count, new_count, new_usage = await asyncio.to_thread(_user_stats_sync)
+        total = (old_count or 0) + (new_count or 0)
 
         return {
             "total_users": total or 0,
@@ -980,7 +1019,8 @@ async def get_user_classification_stats(request: Request):
 
 @router.get("/system/health")
 async def get_system_health(request: Request):
-    """系统整体健康状态"""
+    """系统整体健康状态（平台管理员专用）"""
+    await require_admin(request)  # 系统级数据，仅平台管理员可见
     now_ts = __import__("time").time()
     health = {"info": {}, "checks": []}
 
@@ -1030,7 +1070,7 @@ async def get_system_health(request: Request):
 
     # 数据库状态
     try:
-        user_count = fetch_one("SELECT COUNT(*) as cnt FROM users")["cnt"]
+        user_count = await asyncio.to_thread(fetch_one, "SELECT COUNT(*) as cnt FROM users")["cnt"]
         health["database"] = {"status": "healthy", "users": user_count or 0}
         health["checks"].append({"name": "Database", "status": "ok"})
     except Exception as e:

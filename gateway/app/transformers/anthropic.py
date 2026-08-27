@@ -1,3 +1,4 @@
+# 注意：本模块当前未接入主链路（v10 快照），修复保留待未来接线
 """
 Anthropic ↔ OpenAI 协议转换器 - v9.0
 
@@ -38,7 +39,8 @@ class AnthropicTransformer:
         metadata = {"original_model": body.get("model", "")}
 
         # 提取system消息
-        system_content = None
+        # 修复：多条 system 消息原先后者覆盖前者，改为逐条合并
+        system_parts = []
         messages = body.get("messages", [])
         remaining_messages = []
 
@@ -48,16 +50,18 @@ class AnthropicTransformer:
                 # Anthropic system 是顶层字段
                 content = msg.get("content", "")
                 if isinstance(content, list):
-                    system_content = " ".join(
+                    part = " ".join(
                         c.get("text", "") for c in content if c.get("type") == "text"
                     )
                 else:
-                    system_content = content
+                    part = content
+                if part:
+                    system_parts.append(str(part))
             else:
                 remaining_messages.append(msg)
 
-        if system_content:
-            anthropic["system"] = system_content
+        if system_parts:
+            anthropic["system"] = "\n".join(system_parts)
 
         # 转换消息
         anthropic_messages = []
@@ -76,12 +80,20 @@ class AnthropicTransformer:
                             anthropic_content.append({"type": "text", "text": c.get("text", "")})
                         elif c.get("type") == "image_url":
                             image_url = c.get("image_url", {}).get("url", "")
+                            # 修复：media_type 不再写死 image/jpeg，从 data URL 前缀解析
+                            media_type = "image/jpeg"
+                            base64_data = image_url
+                            if image_url.startswith("data:") and "," in image_url:
+                                meta, base64_data = image_url.split(",", 1)
+                                # 形如 "data:image/png;base64" → image/png
+                                if ";" in meta:
+                                    media_type = meta[5:].split(";", 1)[0] or media_type
                             anthropic_content.append({
                                 "type": "image",
                                 "source": {
                                     "type": "base64",
-                                    "media_type": "image/jpeg",
-                                    "data": image_url.split(",")[-1] if "," in image_url else image_url,
+                                    "media_type": media_type,
+                                    "data": base64_data,
                                 }
                             })
                     anthropic_messages.append({
@@ -98,11 +110,18 @@ class AnthropicTransformer:
                         content_blocks.append({"type": "text", "text": str(content)})
                     for tc in tool_calls:
                         func = tc.get("function", {})
+                        args_raw = func.get("arguments", "{}")
+                        # 修复：arguments 畸形 JSON 时直接抛异常，改为兜底回退原字符串
+                        try:
+                            tool_input = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                        except json.JSONDecodeError:
+                            logger.warning(f"tool_call arguments 非法JSON，回退原字符串: {args_raw[:200]}")
+                            tool_input = args_raw
                         content_blocks.append({
                             "type": "tool_use",
                             "id": tc.get("id", ""),
                             "name": func.get("name", ""),
-                            "input": json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments", ""), str) else func.get("arguments", {}),
+                            "input": tool_input,
                         })
                     anthropic_messages.append({
                         "role": "assistant",
@@ -164,6 +183,13 @@ class AnthropicTransformer:
 
         openai_messages = []
         if system:
+            # 修复：system 为 Anthropic content block 数组时 join 成字符串，
+            # 不能把数组原样传给 OpenAI（其 system content 只接受字符串）
+            if isinstance(system, list):
+                system = "\n".join(
+                    b.get("text", "") for b in system
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
             openai_messages.append({"role": "system", "content": system})
 
         for msg in messages:
@@ -192,7 +218,9 @@ class AnthropicTransformer:
                                 "content": c.get("content", ""),
                             })
                             continue
-                    openai_messages.append({"role": "user", "content": oa_content or ""})
+                    # 修复：tool_result-only 的 user 消息（oa_content 为空）不追加空 content 消息
+                    if oa_content:
+                        openai_messages.append({"role": "user", "content": oa_content})
                 else:
                     openai_messages.append({"role": "user", "content": str(content)})
 

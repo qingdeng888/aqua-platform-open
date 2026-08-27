@@ -89,36 +89,45 @@ def days_ago_utc(days: int) -> str:
 
 
 def execute(sql: str, params: tuple = ()) -> int:
-    """执行写操作并提交，返回影响行数"""
+    """执行写操作并提交，返回影响行数（异常时rollback，避免失败事务随连接归还连接池）"""
     conn = _get_conn()
     try:
         cur = conn.cursor()
         cur.execute(sql, params)
         conn.commit()
         return cur.rowcount
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         _put_conn(conn)
 
 
 def fetch_one(sql: str, params: tuple = ()) -> Optional[dict]:
-    """查询单条记录"""
+    """查询单条记录（异常时rollback，与execute同契约）"""
     conn = _get_conn()
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(sql, params)
         row = cur.fetchone()
         return dict(row) if row else None
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         _put_conn(conn)
 
 
 def fetch_all(sql: str, params: tuple = ()) -> list:
-    """查询多条记录"""
+    """查询多条记录（异常时rollback，与execute同契约）"""
     conn = _get_conn()
     try:
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute(sql, params)
         return [dict(r) for r in cur.fetchall()]
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         _put_conn(conn)
 
@@ -372,9 +381,10 @@ def _migrate_platform_request_logs(conn) -> None:
 def seed_defaults() -> None:
     """初始化默认设置"""
     defaults = {
-        "admin_user_ids": "10001",
         "platform_token": "",
         "rate_limit_prefix": "rl_",
+        # 注册开关：取环境变量 REGISTRATION_OPEN（默认开放）
+        "registration_open": os.environ.get("REGISTRATION_OPEN", "1"),
     }
     for key, value in defaults.items():
         if get_setting(key) is None:

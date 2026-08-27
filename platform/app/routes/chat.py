@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from datetime import datetime, timezone
 
 from bs4 import BeautifulSoup
@@ -15,7 +16,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
-from app.database import execute, fetch_one, fetch_all, utcnow, localnow
+from app.database import execute, fetch_one, fetch_all, utcnow
 from app.security import generate_uuid
 from app.gateway_client import GatewayClient
 from app.routes.auth import get_current_user
@@ -58,8 +59,8 @@ def _get_gw() -> GatewayClient:
         )
     return _gw
 
-# 网关代理地址
-GATEWAY_BASE_URL = os.environ.get("GW_BASE_URL", "http://127.0.0.1:8001")
+# 网关代理地址（默认指向网关8000端口；原默认8001是平台自身端口，会递归请求自己）
+GATEWAY_BASE_URL = os.environ.get("GW_BASE_URL", "http://127.0.0.1:8000")
 GATEWAY_CHAT_URL = f"{GATEWAY_BASE_URL}/v1/chat/completions"
 
 # API密钥加解密 - 使用Fernet对称加密
@@ -105,6 +106,17 @@ def _error_response(message: str, error_type: str, code: str, status_code: int =
         status_code=status_code,
         detail={"message": message, "type": error_type, "code": code},
     )
+
+
+def _client_ip(request: Request) -> str:
+    """取真实客户端IP（优先XFF首个，回退连接对端）"""
+    xff = request.headers.get("x-forwarded-for", "")
+    return xff.split(",")[0].strip() or (request.client.host if request.client else "")
+
+
+def _debug_errors_enabled() -> bool:
+    """错误详情开关：AQUA_DEBUG_ERRORS=1 时向客户端透传原始错误（调试用），默认只给通用文案"""
+    return os.environ.get("AQUA_DEBUG_ERRORS", "") == "1"
 
 
 def _get_model_capabilities(model_id: str) -> list:
@@ -211,44 +223,51 @@ async def _log_request(
         start_ts: 请求开始的时间戳(time.time())，用于记录精确的started_at/completed_at
     """
     try:
-        from datetime import timezone, timedelta
-        CST = timezone(timedelta(hours=8))
-        now = localnow()
+        # 写库时间戳统一UTC（Z格式），与平台契约一致
+        now = utcnow()
         latency_us = int(latency_ms * 1000)
 
-        # 精确的开始和结束时间（本地CST时间，毫秒精度）
+        # 精确的开始和结束时间（UTC，毫秒精度）
         if start_ts is not None:
-            start_dt = datetime.fromtimestamp(start_ts, tz=CST)
-            end_dt = datetime.fromtimestamp(start_ts + latency_ms / 1000, tz=CST)
-            started_at = start_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start_dt.microsecond // 1000:03d}+08:00"
-            completed_at = end_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{end_dt.microsecond // 1000:03d}+08:00"
+            start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+            end_dt = datetime.fromtimestamp(start_ts + latency_ms / 1000, tz=timezone.utc)
+            started_at = start_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start_dt.microsecond // 1000:03d}Z"
+            completed_at = end_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{end_dt.microsecond // 1000:03d}Z"
         else:
             started_at = ""
             completed_at = ""
 
-        execute(
-            """INSERT INTO request_logs
-               (user_id, key_id, model, is_stream, prompt_tokens, completion_tokens,
-                total_tokens, latency_ms, status, error_msg, created_at,
-                started_at, completed_at, latency_us)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (
-                user_id,
-                key_id,
-                model,
-                1 if is_stream else 0,
-                prompt_tokens,
-                completion_tokens,
-                total_tokens,
-                round(latency_ms, 3),
-                status,
-                error_msg,
-                now,
-                started_at,
-                completed_at,
-                latency_us,
-            ),
-        )
+        # 日志写入改为fire-and-forget后台线程任务：流式请求结束时立即返回客户端，
+        # 不因同步DB INSERT阻塞事件循环；失败仅吞异常（与原契约一致）
+        def _insert_log():
+            try:
+                execute(
+                    """INSERT INTO request_logs
+                       (user_id, key_id, model, is_stream, prompt_tokens, completion_tokens,
+                        total_tokens, latency_ms, status, error_msg, created_at,
+                        started_at, completed_at, latency_us)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        user_id,
+                        key_id,
+                        model,
+                        1 if is_stream else 0,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        round(latency_ms, 3),
+                        status,
+                        error_msg,
+                        now,
+                        started_at,
+                        completed_at,
+                        latency_us,
+                    ),
+                )
+            except Exception:
+                pass
+
+        asyncio.get_running_loop().run_in_executor(None, _insert_log)
     except Exception:
         pass
 
@@ -297,6 +316,7 @@ def _increment_daily_usage(user_id: int):
 
 _WEB_SEARCH_CACHE = {}
 _WEB_SEARCH_CACHE_TTL = 120  # 搜索结果缓存2分钟
+_WEB_SEARCH_CACHE_MAX = 512  # 缓存条目上限（简易FIFO淘汰，防止无界增长）
 
 async def _web_search(query: str, max_results: int = 6) -> list:
     """
@@ -405,7 +425,9 @@ async def _web_search(query: str, max_results: int = 6) -> list:
         except Exception as e:
             _logger.debug(f"DuckDuckGo HTML搜索失败: {e}")
 
-    # 写入缓存
+    # 写入缓存（超上限按插入顺序FIFO淘汰最旧条目）
+    if len(_WEB_SEARCH_CACHE) >= _WEB_SEARCH_CACHE_MAX:
+        _WEB_SEARCH_CACHE.pop(next(iter(_WEB_SEARCH_CACHE)))
     _WEB_SEARCH_CACHE[cache_key] = {"results": results, "ts": time.time()}
 
     # 清理过期缓存
@@ -463,7 +485,8 @@ async def chat_completions(request: Request):
     user = await get_current_user(request)
 
     # 获取用户密钥（含加密数据回填）
-    key_row = fetch_one(
+    key_row = await asyncio.to_thread(
+        fetch_one,
         """SELECT id, gw_client_id, gw_key_id, api_key_encrypted, key_prefix FROM user_api_keys
            WHERE user_id=%s AND status='active' LIMIT 1""",
         (user["id"],),
@@ -482,7 +505,7 @@ async def chat_completions(request: Request):
     if not api_key and key_row["gw_client_id"]:
         try:
             # 获取该客户端的所有密钥
-            gw_keys = await _gw.list_client_keys(key_row["gw_client_id"])
+            gw_keys = await _get_gw().list_client_keys(key_row["gw_client_id"])  # 修复：原直接用模块级 _gw（初始 None，回填必然 AttributeError 被吞）
             if gw_keys:
                 # 优先匹配 gw_key_id，否则取第一个active的密钥
                 target_key = None
@@ -506,7 +529,8 @@ async def chat_completions(request: Request):
                 if api_key:
                     # 回填本地加密数据和gw_key_id
                     encrypted = encrypt_api_key(api_key)
-                    execute(
+                    await asyncio.to_thread(
+                        execute,
                         "UPDATE user_api_keys SET api_key_encrypted=%s, gw_key_id=%s WHERE id=%s",
                         (encrypted, gw_key_id, key_row["id"]),
                     )
@@ -565,8 +589,9 @@ async def chat_completions(request: Request):
     start_time = time.time()
 
     if is_stream:
-        # 流式代理
-        collected_chunks = []
+        # 流式代理：只保留含 "usage" 的行用于统计，另存最后50行用于错误诊断，不整流累积
+        usage_lines = []
+        tail_lines = deque(maxlen=50)
         search_sent = False
 
         async def stream_generator():
@@ -590,11 +615,18 @@ async def chat_completions(request: Request):
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
+                        # 透传真实客户端IP给网关（网关现在只在私网对端即本平台时才信任该头）
+                        "X-Forwarded-For": _client_ip(request),
                     },
                 ) as resp:
                     if resp.status_code != 200:
                         error_body = await resp.aread()
-                        yield f"data: {error_body.decode()}\n\n"
+                        # 默认不向客户端透传上游错误详情；AQUA_DEBUG_ERRORS=1 保留原样
+                        if _debug_errors_enabled():
+                            yield f"data: {error_body.decode()}\n\n"
+                        else:
+                            _logger.error(f"网关流式请求失败: status={resp.status_code}, body={error_body.decode(errors='replace')[:500]}")
+                            yield f"data: {json.dumps({'error': {'message': '网关服务暂时不可用，请稍后重试', 'type': 'server_error', 'code': 'gateway_error'}})}\n\n"
                         latency = (time.time() - start_time) * 1000
                         await _log_request(
                             user["id"], key_id, model, True, 0, 0, 0,
@@ -605,12 +637,15 @@ async def chat_completions(request: Request):
 
                     async for line in resp.aiter_lines():
                         if line:
-                            collected_chunks.append(line)
+                            # 仅保留含 usage 的行（统计用），其余只进50行环形缓冲做截断诊断
+                            if '"usage"' in line:
+                                usage_lines.append(line)
+                            tail_lines.append(line)
                             yield line + "\n\n"
 
                 # 流结束后记录日志
                 latency = (time.time() - start_time) * 1000
-                usage = _parse_usage_from_stream(collected_chunks)
+                usage = _parse_usage_from_stream(usage_lines)
                 await _log_request(
                     user["id"],
                     key_id,
@@ -624,8 +659,8 @@ async def chat_completions(request: Request):
                     "",
                     start_ts=start_time,
                 )
-                # 成功：增加日用量
-                _increment_daily_usage(user["id"])
+                # 成功：增加日用量（含同步DB，经线程池执行）
+                await asyncio.to_thread(_increment_daily_usage, user["id"])
             except httpx.ConnectError:
                 latency = (time.time() - start_time) * 1000
                 _logger.error(f"网关连接失败: {GATEWAY_CHAT_URL}")
@@ -638,6 +673,7 @@ async def chat_completions(request: Request):
                 )
             except Exception as e:
                 latency = (time.time() - start_time) * 1000
+                _logger.error(f"流式代理异常: {type(e).__name__}: {e}; 截断诊断尾行: {list(tail_lines)[-3:]}")
                 await _log_request(
                     user["id"], key_id, model, True, 0, 0, 0,
                     latency, "error", str(e)[:500],
@@ -660,6 +696,8 @@ async def chat_completions(request: Request):
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
+                    # 透传真实客户端IP给网关（网关现在只在私网对端即本平台时才信任该头）
+                    "X-Forwarded-For": _client_ip(request),
                 },
             )
 
@@ -689,9 +727,9 @@ async def chat_completions(request: Request):
                 start_ts=start_time,
             )
 
-            # v9.0: 成功时增加日用量
+            # v9.0: 成功时增加日用量（含同步DB，经线程池执行）
             if resp.status_code == 200:
-                _increment_daily_usage(user["id"])
+                await asyncio.to_thread(_increment_daily_usage, user["id"])
 
             # v10.0: 非流式响应注入搜索结果
             if search_results and isinstance(resp_data, dict):
@@ -702,6 +740,7 @@ async def chat_completions(request: Request):
             return JSONResponse(content=resp_data, status_code=resp.status_code)
         except Exception as e:
             latency = (time.time() - start_time) * 1000
+            _logger.error(f"非流式代理异常: {type(e).__name__}: {e}")
             await _log_request(
                 user["id"], key_id, model, False, 0, 0, 0,
                 latency, "error", str(e)[:500],
@@ -710,7 +749,8 @@ async def chat_completions(request: Request):
             return JSONResponse(
                 content={
                     "error": {
-                        "message": str(e),
+                        # 默认通用文案防内部信息泄露；AQUA_DEBUG_ERRORS=1 保留原始错误
+                        "message": str(e) if _debug_errors_enabled() else "网关服务暂时不可用，请稍后重试",
                         "type": "server_error",
                         "code": "proxy_error",
                     }
@@ -724,7 +764,8 @@ async def list_history(request: Request):
     """获取对话历史列表"""
     user = await get_current_user(request)
 
-    histories = fetch_all(
+    histories = await asyncio.to_thread(
+        fetch_all,
         """SELECT id, title, model, created_at, updated_at
            FROM chat_history WHERE user_id=%s
            ORDER BY updated_at DESC""",
@@ -738,7 +779,8 @@ async def get_history(history_id: str, request: Request):
     """获取对话历史详情"""
     user = await get_current_user(request)
 
-    history = fetch_one(
+    history = await asyncio.to_thread(
+        fetch_one,
         "SELECT * FROM chat_history WHERE id=%s AND user_id=%s",
         (history_id, user["id"]),
     )
@@ -772,7 +814,8 @@ async def create_history(req: CreateHistoryRequest, request: Request):
     now = utcnow()
     messages_json = json.dumps(req.messages, ensure_ascii=False)
 
-    execute(
+    await asyncio.to_thread(
+        execute,
         """INSERT INTO chat_history (id, user_id, title, messages, model, created_at, updated_at)
            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
         (history_id, user["id"], req.title, messages_json, req.model, now, now),
@@ -786,7 +829,8 @@ async def update_history(history_id: str, req: UpdateHistoryRequest, request: Re
     """更新对话历史"""
     user = await get_current_user(request)
 
-    existing = fetch_one(
+    existing = await asyncio.to_thread(
+        fetch_one,
         "SELECT id FROM chat_history WHERE id=%s AND user_id=%s",
         (history_id, user["id"]),
     )
@@ -796,7 +840,8 @@ async def update_history(history_id: str, req: UpdateHistoryRequest, request: Re
     now = utcnow()
     messages_json = json.dumps(req.messages, ensure_ascii=False)
 
-    execute(
+    await asyncio.to_thread(
+        execute,
         "UPDATE chat_history SET title=%s, messages=%s, updated_at=%s WHERE id=%s",
         (req.title, messages_json, now, history_id),
     )
@@ -809,13 +854,14 @@ async def delete_history(history_id: str, request: Request):
     """删除对话历史"""
     user = await get_current_user(request)
 
-    existing = fetch_one(
+    existing = await asyncio.to_thread(
+        fetch_one,
         "SELECT id FROM chat_history WHERE id=%s AND user_id=%s",
         (history_id, user["id"]),
     )
     if not existing:
         _error_response("对话历史不存在", "not_found", "history_not_found", 404)
 
-    execute("DELETE FROM chat_history WHERE id=%s", (history_id,))
+    await asyncio.to_thread(execute, "DELETE FROM chat_history WHERE id=%s", (history_id,))
 
     return {"message": "已删除"}

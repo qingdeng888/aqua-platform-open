@@ -119,8 +119,8 @@ def send_verification_code_sync(to_email: str, code: str, purpose: str) -> bool:
 
 
 async def send_verification_code(to_email: str, code: str, purpose: str) -> bool:
-    """异步发送验证码邮件"""
-    loop = asyncio.get_event_loop()
+    """异步发送验证码邮件（get_running_loop：3.12起协程内 get_event_loop 已废弃）"""
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None, send_verification_code_sync, to_email, code, purpose
     )

@@ -1,20 +1,19 @@
-"""Platform端模型兼容层 - 从Gateway的NIM模型目录获取模型能力标签和排序优先级"""
+"""Platform端模型兼容层 - 模型能力标签/排序优先级
 
-import sys
-import os
+网关目录由网关侧富化（gateway/app/nim_models.py 仅在网关进程内可用），平台侧仅关键词粗判。
+历史上的 sys.path hack（把 gateway 目录插进搜索路径再 import app.nim_models）从未生效：
+平台自身就是 app 包，import 永远解析回平台目录，故已删除；
+能力标签/排序的精确数据请从网关 API 获取，本模块恒走 fallback 路径。
+"""
 
-# 将gateway目录加入sys.path以导入nim_models
-_gw_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "gateway")
-if _gw_path not in sys.path:
-    sys.path.insert(0, _gw_path)
+# 平台侧无网关模型目录：目录相关能力恒为“不可用”，调用方（routes/chat.py）落到关键词粗判
+_HAS_NIM_MODELS = False
+NIM_MODEL_CATALOG = {}
 
-try:
-    from app.nim_models import NIM_MODEL_CATALOG, get_model_sort_priority
-    _HAS_NIM_MODELS = True
-except ImportError:
-    _HAS_NIM_MODELS = False
-    NIM_MODEL_CATALOG = {}
-    get_model_sort_priority = lambda *a, **kw: {}
+
+def get_model_sort_priority(*_args, **_kwargs) -> dict:
+    """兼容占位：平台侧无目录，恒返回空映射"""
+    return {}
 
 
 # 能力标签映射（基于NIM_MODEL_CATALOG中的字段）

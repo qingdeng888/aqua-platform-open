@@ -24,7 +24,9 @@
 - 差异化403/429/timeout冷却（配合scheduler.py的差异化策略）
 """
 import asyncio
+import contextvars
 import json
+import os
 import time
 import traceback
 import uuid
@@ -39,7 +41,7 @@ from pydantic import BaseModel, ConfigDict
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.database import (
-    fetch_one, fetch_all, execute, get_setting, insert_audit, utcnow, localnow,
+    fetch_one, fetch_all, execute, insert_audit, utcnow, localnow,
 )
 from app.security import (
     decrypt_secret, decrypt_upstream_key, hash_secret, mask_secret,
@@ -64,6 +66,82 @@ from app.circuit_breaker import (
 logger = logging.getLogger("acu.api")
 
 router = APIRouter()
+
+# AQUA_DEBUG_ERRORS=1 时错误响应保留原始异常细节（排障用），默认对外隐藏内部细节
+_DEBUG_ERRORS = os.environ.get("AQUA_DEBUG_ERRORS", "") == "1"
+
+# ========== 设置缓存（60秒TTL，避免热路径每请求2次同步DB查询阻塞事件循环） ==========
+_settings_cache: dict = {}  # key -> (value, cached_ts)
+# 请求级调度耗时（替代原 scheduler._last_dispatch_ms 实例属性——并发下会互相串号）
+_dispatch_ms_var: contextvars.ContextVar = contextvars.ContextVar("gateway_dispatch_ms", default=0.0)
+_SETTINGS_CACHE_TTL = 60.0
+
+
+def _clear_settings_cache():
+    """清空设置缓存（设置更新后由 admin_api 的 settings 保存端点调用）"""
+    _settings_cache.clear()
+
+
+async def get_setting_cached(key: str) -> Optional[str]:
+    """带60秒TTL缓存的设置读取；缓存miss时经线程池查DB，不阻塞事件循环。
+    DB默认值逻辑与原 get_setting 一致（未配置返回None，由调用方 or 默认值兜底）"""
+    now_ts = time.time()
+    hit = _settings_cache.get(key)
+    if hit is not None and now_ts - hit[1] < _SETTINGS_CACHE_TTL:
+        return hit[0]
+    row = await asyncio.to_thread(fetch_one, "SELECT value FROM admin_settings WHERE key = %s", (key,))
+    value = row["value"] if row else None
+    _settings_cache[key] = (value, now_ts)
+    return value
+
+
+# ========== fire-and-forget 后台任务（限并发，避免大量裸线程/无界并发写库） ==========
+_bg_tasks: set = set()
+_bg_semaphore = asyncio.Semaphore(16)
+
+
+def _spawn_bg_task(coro):
+    """以后台任务方式执行协程：全局Semaphore(16)限并发，持有引用防GC，异常仅记日志"""
+    async def _runner():
+        async with _bg_semaphore:
+            await coro
+
+    def _done(t):
+        _bg_tasks.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.error(f"后台任务异常: {t.exception()}")
+
+    try:
+        task = asyncio.create_task(_runner())
+        _bg_tasks.add(task)
+        task.add_done_callback(_done)
+    except RuntimeError:
+        # 无运行中的事件循环（极端情况）：放弃执行，避免影响主流程
+        try:
+            coro.close()
+        except Exception:
+            pass
+
+
+def _safe_err_text(e: Exception, fallback: str) -> str:
+    """对外错误文案：默认用通用文案，避免内部异常细节回传客户端（AQUA_DEBUG_ERRORS=1保留原样）"""
+    return f"{fallback}: {e}" if _DEBUG_ERRORS else fallback
+
+
+def _sanitize_upstream_error(body, status_code: int, raw_text: str = "") -> dict:
+    """上游4xx透传前净化：仅保留message字段，剥离其余内部字段（AQUA_DEBUG_ERRORS=1时原样透传）"""
+    if _DEBUG_ERRORS:
+        return body if isinstance(body, dict) else {"error": {"message": str(body)[:300]}}
+    message = ""
+    if isinstance(body, dict):
+        err_obj = body.get("error", body)
+        if isinstance(err_obj, dict):
+            message = str(err_obj.get("message", "") or "")[:300]
+        elif err_obj is not None:
+            message = str(err_obj)[:300]
+    elif body is not None:
+        message = str(body)[:300]
+    return {"error": {"message": message or raw_text[:300] or f"上游服务返回错误(HTTP {status_code})"}}
 
 # ========== 流式稳定性配置 ==========
 # SSE keepalive心跳间隔（秒）- 在流式传输空闲期间发送": ping"注释行
@@ -93,7 +171,7 @@ class ChatRequest(BaseModel):
 
 # ========== 客户端认证 ==========
 
-def authenticate_client(request: Request) -> dict:
+async def authenticate_client(request: Request) -> dict:
     """
     验证下游客户端API密钥
 
@@ -135,8 +213,10 @@ def authenticate_client(request: Request) -> dict:
     if cached is not None:
         return dict(cached)
 
-    key_row = fetch_one(
-        "SELECT ck.id, ck.client_id, ck.status, c.name as client_name, c.status as client_status, "
+    key_row = await asyncio.to_thread(
+        fetch_one,
+        "SELECT ck.id, ck.client_id, ck.status, ck.key_prefix, "
+        "c.name as client_name, c.status as client_status, "
         "COALESCE(c.user_type, 'old') as user_type "
         "FROM client_api_keys ck "
         "JOIN clients c ON ck.client_id = c.id "
@@ -151,15 +231,9 @@ def authenticate_client(request: Request) -> dict:
             "code": "invalid_api_key",
         })
 
-    # v10.0: last_used_at 更新改为后台线程（避免同步DB写阻塞事件循环）
+    # v10.0: last_used_at 更新改为限并发后台任务（避免同步DB写阻塞事件循环）
     try:
-        import threading
-        _now = utcnow()
-        _kid = key_row["id"]
-        threading.Thread(
-            target=lambda: _async_update_last_used(_kid, _now),
-            daemon=True
-        ).start()
+        _spawn_bg_task(asyncio.to_thread(_async_update_last_used, key_row["id"], utcnow()))
     except Exception:
         pass
 
@@ -181,35 +255,14 @@ def _async_update_last_used(key_id, ts):
 
 _models_cache = {"data": None, "expires": 0}
 
-# 经过实际API调用验证的可用模型集合（硬编码白名单+运行时验证）
+# 经过实际API调用验证的可用模型集合：动态取自NIM模型目录（nim_models 仅收录实测可用模型），
+# 消除与目录的第三份硬编码拷贝导致的漂移
 # NVIDIA NIM的/v1/models端点会列出所有平台模型，但很多实际上无法通过chat/completions调用
-# 这里只保留实测可用的模型ID，确保用户看到的每个模型都能实际使用
-_VERIFIED_WORKING_MODELS = {
-    "deepseek-ai/deepseek-v4-pro-0813",
-    "google/diffusiongemma-26b-a4b-it",
-    "google/gemma-4-31b-it",
-    "meta/llama-3.2-11b-vision-instruct",
-    "meta/llama-3.2-90b-vision-instruct",
-    "meta/muse-glimmer-30b",
-    "minimaxai/minimax-m3",
-    "moonshotai/kimi-k3",
-    "nvidia/ising-calibration-1.5-31b",
-    "nvidia/llama-3.1-nemoguard-8b-content-safety",
-    "nvidia/llama-3.1-nemotron-safety-guard-8b-v3",
-    "nvidia/nemotron-3-nano-30b-a3b",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
-    "nvidia/nemotron-3-super-120b-a12b",
-    "nvidia/nemotron-3.5-content-safety",
-    "nvidia/nemotron-3.5-lightning-30b-a3b",
-    "nvidia/riva-translate-4b-instruct-v1.1",
-    "nvidia/riva-translate-4b-instruct-v2",
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-    "poolside/laguna-xs-2.1",
-    "stepfun-ai/step-3.7-flash",
-    "mistralai/mistral-nemotron",
-    "nvidia/nemotron-3-ultra-550b-a55b",
-}
+try:
+    from app.nim_models import NIM_MODEL_CATALOG as _NIM_CATALOG
+except ImportError:
+    _NIM_CATALOG = {}
+_VERIFIED_WORKING_MODELS = set(_NIM_CATALOG.keys())
 
 
 async def fetch_upstream_models() -> list:
@@ -218,9 +271,9 @@ async def fetch_upstream_models() -> list:
     if _models_cache["data"] and _models_cache["expires"] > now_ts:
         return _models_cache["data"]
 
-    raw_base_url = get_setting("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+    raw_base_url = await get_setting_cached("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
     base_url, _ = normalize_base_url(raw_base_url)
-    models_path = get_setting("models_path") or "/models"
+    models_path = await get_setting_cached("models_path") or "/models"
     url = f"{base_url}{models_path}"
 
     # 通过调度器选择一个当前最优的密钥（避免取到冷却中的密钥）
@@ -411,7 +464,7 @@ async def list_models(request: Request):
     """OpenAI兼容模型列表（含能力标签和友好名称）"""
     # 尝试认证（可选，不强制）
     try:
-        await asyncio.to_thread(authenticate_client, request)
+        await authenticate_client(request)
     except HTTPException:
         pass  # 未认证也允许查看模型列表
 
@@ -471,10 +524,11 @@ async def _handle_stream_request(
             raise UpstreamRetryableError(f"429: key={key_id[:8]} model={model}")
         elif resp.status_code == 403:
             # 403 - 上游密钥被限制，触发差异化冷却并重试其他密钥
+            # 注意：此处不release并发计数，与429/5xx一致，
+            # 由重试成功后的完成路径或chat_completions重试耗尽路径统一release（避免双重release）
             scheduler.record_response(key_id, model, False, rt, 403, "4xx")
             scheduler.trigger_hard_cooldown(key_id, model, "403")
             logger.warning(f"上游403: key={key_id[:8]} model={model} 触发差异化冷却")
-            scheduler.release_client_request(client_id)
             raise UpstreamRetryableError(f"403: key={key_id[:8]} model={model}")
         elif resp.status_code >= 500:
             scheduler.record_response(key_id, model, False, rt, resp.status_code, "5xx")
@@ -504,8 +558,10 @@ async def _handle_stream_request(
                             "code": "model_not_found",
                         }
                     })
-            
-            return JSONResponse(status_code=resp.status_code, content=error_body)
+
+            # 透传前净化：仅保留message字段，剥离上游内部细节
+            return JSONResponse(status_code=resp.status_code,
+                                content=_sanitize_upstream_error(error_body, resp.status_code, error_text))
 
     # 状态码200 - 创建流式生成器（: 带keepalive和per-chunk空闲检测）
     async def stream_generator():
@@ -516,42 +572,86 @@ async def _handle_stream_request(
         last_data_time = time.time()  # 上次收到上游数据的时间
         last_keepalive_time = time.time()  # 上次发送keepalive的时间
         chunks_received = 0  # 已接收的SSE事件数
+        line_iter = None     # 手动驱动的行迭代器
+        pending_line = None  # 挂起中的读取任务（跨keepalive心跳保留，不取消）
 
         try:
-            # 使用aiter_lines逐行读取，配合空闲检测
-            async for line in resp.aiter_lines():
+            # 手动驱动迭代器：15秒无数据则发送keepalive心跳，连续无数据超过180秒才放弃。
+            # 用shield保护挂起的读取任务：wait_for超时只取消外层shield，不取消底层流读取，
+            # 避免心跳一次后迭代器被终止导致整个流中断（原async for写法心跳只在收到空行时才发送，实际失效）
+            line_iter = resp.aiter_lines().__aiter__()
+            while True:
+                if pending_line is None:
+                    pending_line = asyncio.ensure_future(line_iter.__anext__())
+                try:
+                    line = await asyncio.wait_for(asyncio.shield(pending_line), SSE_KEEPALIVE_INTERVAL)
+                    pending_line = None
+                except asyncio.TimeoutError:
+                    now = time.time()
+
+                    # per-chunk空闲超时检测：连续无数据超过上限 - 优雅终止流式传输
+                    idle_time = now - last_data_time
+                    if idle_time > STREAM_CHUNK_IDLE_TIMEOUT:
+                        logger.warning(
+                            f"流式空闲超时: key={key_id[:8]} model={model} "
+                            f"idle={idle_time:.0f}s chunks={chunks_received} "
+                            f"已接收部分数据，优雅终止"
+                        )
+                        # 如果已收到部分数据，发送超时错误事件但保留已生成内容
+                        rt = now - start_time
+                        scheduler.record_response(key_id, model, False, rt, 0, "timeout")
+                        scheduler.trigger_hard_cooldown(key_id, model, "timeout")
+                        error_data = {"error": {"message": "上游响应超时（空闲时间过长）",
+                                                "type": "timeout_error", "code": "upstream_idle_timeout"}}
+                        yield f"data: {json.dumps(error_data)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        scheduler.release_client_request(client_id)
+                        await _log_request(
+                            client_id, key_id, model, 504, rt,
+                            prompt_tokens, completion_tokens, total_tokens, True,
+                            f"流式空闲超时(idle={idle_time:.0f}s)",
+                            start_ts=start_time,
+                            error_type="IdleTimeout", error_detail=f"空闲{idle_time:.0f}s超时",
+                            business_code="upstream_idle_timeout",
+                            request_path=str(request.url.path), http_method=request.method,
+                            client_ip=get_client_ip(request), user_agent=request.headers.get("user-agent", "")[:512],
+                        )
+                        return
+
+                    # 客户端已断开 - 中止流式传输（无需再发数据）
+                    try:
+                        if await request.is_disconnected():
+                            logger.warning(
+                                f"客户端断开连接: key={key_id[:8]} model={model} "
+                                f"已接收{chunks_received}个chunk，中止流式传输"
+                            )
+                            rt = now - start_time
+                            scheduler.record_response(key_id, model, False, rt, 0, "conn_error")
+                            scheduler.release_client_request(client_id)
+                            await _log_request(
+                                client_id, key_id, model, 499, rt,
+                                prompt_tokens, completion_tokens, total_tokens, True,
+                                f"客户端断开连接(已接收{chunks_received}chunks)",
+                                start_ts=start_time,
+                                error_type="ClientDisconnected", error_detail="客户端断开连接",
+                                business_code="client_disconnected",
+                                request_path=str(request.url.path), http_method=request.method,
+                                client_ip=get_client_ip(request), user_agent=request.headers.get("user-agent", "")[:512],
+                            )
+                            return
+                    except Exception:
+                        pass  # 断连检测失败不影响心跳
+
+                    # 发送SSE注释行作为keepalive（客户端会忽略SSE注释）
+                    yield ": ping\n\n"
+                    last_keepalive_time = now
+                    logger.debug(f"流式keepalive: key={key_id[:8]} model={model}")
+                    continue
+                except StopAsyncIteration:
+                    pending_line = None
+                    break
+
                 now = time.time()
-
-                # per-chunk空闲超时检测
-                idle_time = now - last_data_time
-                if idle_time > STREAM_CHUNK_IDLE_TIMEOUT:
-                    # 空闲超时 - 优雅终止流式传输
-                    logger.warning(
-                        f"流式空闲超时: key={key_id[:8]} model={model} "
-                        f"idle={idle_time:.0f}s chunks={chunks_received} "
-                        f"已接收部分数据，优雅终止"
-                    )
-                    # 如果已收到部分数据，发送超时错误事件但保留已生成内容
-                    rt = now - start_time
-                    scheduler.record_response(key_id, model, False, rt, 0, "timeout")
-                    scheduler.trigger_hard_cooldown(key_id, model, "timeout")
-                    error_data = {"error": {"message": "上游响应超时（空闲时间过长）",
-                                            "type": "timeout_error", "code": "upstream_idle_timeout"}}
-                    yield f"data: {json.dumps(error_data)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    scheduler.release_client_request(client_id)
-                    await _log_request(
-                        client_id, key_id, model, 504, rt,
-                        prompt_tokens, completion_tokens, total_tokens, True,
-                        f"流式空闲超时(idle={idle_time:.0f}s)",
-                        start_ts=start_time,
-                        error_type="IdleTimeout", error_detail=f"空闲{idle_time:.0f}s超时",
-                        business_code="upstream_idle_timeout",
-                        request_path=str(request.url.path), http_method=request.method,
-                        client_ip=get_client_ip(request), user_agent=request.headers.get("user-agent", "")[:512],
-                    )
-                    return
-
                 if line:
                     last_data_time = now
                     chunks_received += 1
@@ -570,13 +670,7 @@ async def _handle_stream_request(
                             pass
                     yield f"{line}\n\n"
                     last_keepalive_time = now  # 收到数据时重置keepalive计时
-                else:
-                    # 空行 - 检查是否需要发送keepalive
-                    if now - last_keepalive_time >= SSE_KEEPALIVE_INTERVAL:
-                        # 发送SSE注释行作为keepalive（客户端会忽略SSE注释）
-                        yield ": ping\n\n"
-                        last_keepalive_time = now
-                        logger.debug(f"流式keepalive: key={key_id[:8]} model={model}")
+                # 空行无需特殊处理（keepalive已由上面的超时心跳机制承担）
 
             # 流式完成 - 发送[DONE]标记
             yield "data: [DONE]\n\n"
@@ -627,15 +721,21 @@ async def _handle_stream_request(
             scheduler.record_response(key_id, model, False, rt, 0, "conn_error")
             logger.warning(f"流式读取错误: key={key_id[:8]} model={model} chunks={chunks_received} error={e}")
             # 如果已收到部分数据，只记录为部分成功（不触发冷却/隔离）
-            if chunks_received > 0 and prompt_tokens > 0:
-                logger.info(f"流式部分完成: key={key_id[:8]} model={model} 已接收{chunks_received}个chunk, prompt={prompt_tokens} tokens")
+            # 修复：原条件要求prompt_tokens>0，但usage通常在最后一个chunk才下发，
+            # 断连时几乎必然为0，导致部分恢复路径不可达；usage缺失时按chunk数粗略估算补齐
+            if chunks_received > 0:
+                if total_tokens <= 0:
+                    total_tokens = chunks_received * 8  # 粗略估算：每个SSE chunk约8 tokens
+                    if completion_tokens <= 0:
+                        completion_tokens = total_tokens
+                logger.info(f"流式部分完成: key={key_id[:8]} model={model} 已接收{chunks_received}个chunk, 估算tokens={total_tokens}")
                 # 有部分数据时尝试恢复：发送stop信号让客户端继续处理已收到的内容
                 finish_data = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
                 yield f"data: {json.dumps(finish_data)}\n\n"
             else:
                 scheduler.trigger_hard_cooldown(key_id, model, "timeout")
                 # 无有效数据时发送error让客户端知道出错了，但不发送[DONE]阻止重试
-                error_data = {"error": {"message": f"流式传输中断: {str(e)}",
+                error_data = {"error": {"message": _safe_err_text(e, "上游服务暂时不可用（流式连接中断）"),
                                         "type": "connection_error", "code": "stream_interrupted"}}
                 yield f"data: {json.dumps(error_data)}\n\n"
             yield "data: [DONE]\n\n"
@@ -654,7 +754,8 @@ async def _handle_stream_request(
         except Exception as e:
             rt = time.time() - start_time
             scheduler.record_response(key_id, model, False, rt, 0, "error")
-            error_data = {"error": {"message": f"流式传输错误: {str(e)}",
+            logger.error(f"流式异常: key={key_id[:8]} model={model} error={e}", exc_info=True)
+            error_data = {"error": {"message": _safe_err_text(e, "内部错误"),
                                     "type": "internal_error", "code": "stream_error"}}
             yield f"data: {json.dumps(error_data)}\n\n"
             yield "data: [DONE]\n\n"
@@ -670,6 +771,9 @@ async def _handle_stream_request(
                 client_ip=get_client_ip(request), user_agent=request.headers.get("user-agent", "")[:512],
             )
         finally:
+            # 取消仍挂起的读取任务，避免任务泄漏
+            if pending_line is not None and not pending_line.done():
+                pending_line.cancel()
             await resp.aclose()
 
     return StreamingResponse(
@@ -730,7 +834,7 @@ async def _handle_nonstream_request(
                 client_id, key_id, model, 200, rt,
                 prompt_tokens, completion_tokens, total_tokens, False, "",
                 start_ts=start_time,
-                response_body=json.dumps(data, ensure_ascii=False)[:65536],
+                response_body=json.dumps(data, ensure_ascii=False)[:8192],  # 入库截断8KB，防大响应拖垮日志表
                 request_path=str(request.url.path) if request else "",
                 http_method=request.method if request else "",
                 client_ip=get_client_ip(request) if request else "",
@@ -748,10 +852,11 @@ async def _handle_nonstream_request(
 
         elif resp.status_code == 403:
             # 403 - 上游密钥被限制，触发差异化冷却并重试其他密钥
+            # 注意：此处不release并发计数，与429/5xx一致，
+            # 由重试成功后的完成路径或chat_completions重试耗尽路径统一release（避免双重release）
             scheduler.record_response(key_id, model, False, rt, 403, "4xx")
             scheduler.trigger_hard_cooldown(key_id, model, "403")
             logger.warning(f"上游403: key={key_id[:8]} model={model} 触发差异化冷却")
-            scheduler.release_client_request(client_id)
             # 记录403日志
             try:
                 error_body = resp.json()
@@ -819,7 +924,9 @@ async def _handle_nonstream_request(
                 client_ip=get_client_ip(request) if request else "",
                 user_agent=request.headers.get("user-agent", "")[:512] if request else "",
             )
-            return JSONResponse(status_code=resp.status_code, content=error_body)
+            # 透传前净化：保留状态码与message字段，剥离上游内部细节
+            return JSONResponse(status_code=resp.status_code,
+                                content=_sanitize_upstream_error(error_body, resp.status_code, resp.text))
 
     except UpstreamRetryableError:
         raise  # 重新抛出给tenacity处理
@@ -859,8 +966,8 @@ async def _call_upstream(
     select_result = await asyncio.to_thread(scheduler.select_key, model)
     _key_select_ms = (time.time() - _key_select_start) * 1000
 
-    # 将调度耗时存入scheduler临时属性和request.state，供日志记录使用
-    scheduler._last_dispatch_ms = _key_select_ms
+    # 调度耗时写入请求级 ContextVar（并发请求互不串号；create_task 会拷贝上下文快照）
+    _dispatch_ms_var.set(_key_select_ms)
     if request and hasattr(request, 'state'):
         request.state.gateway_dispatch_ms = _key_select_ms
     if not select_result:
@@ -919,7 +1026,7 @@ async def _call_upstream(
         scheduler.release_client_request(client_id)
         logger.error(f"请求异常: key={key_id[:8]} model={model} error={e}", exc_info=True)
         raise HTTPException(status_code=500, detail={
-            "message": f"内部错误: {str(e)}",
+            "message": _safe_err_text(e, "内部错误"),
             "type": "internal_error",
             "code": "internal_error",
         })
@@ -941,9 +1048,9 @@ async def chat_completions(request: Request):
     5. 流式/非流式响应
     6. 记录请求日志
     """
-    # 1. 客户端认证 (v10.0: 异步调用避免同步DB查询阻塞事件循环)
+    # 1. 客户端认证 (v10.0: DB查询经线程池，避免阻塞事件循环)
     try:
-        client_info = await asyncio.to_thread(authenticate_client, request)
+        client_info = await authenticate_client(request)
         client_id = client_info["client_id"]
     except HTTPException as e:
         # : 认证失败日志 - 尝试从key_prefix解析client信息
@@ -951,12 +1058,13 @@ async def chat_completions(request: Request):
         _auth_client_id = ""
         _auth_header = request.headers.get("authorization", "")
         if _auth_header.startswith("Bearer "):
-            _auth_key_prefix = _auth_header[7:20]
+            # 脱敏后再查库（key_prefix列存的就是mask_secret结果），避免真实key前缀明文进入查询/日志
+            _auth_key_prefix = mask_secret(_auth_header[7:].strip())
             try:
                 _key_row = await asyncio.to_thread(
                     fetch_one,
-                    "SELECT client_id FROM client_api_keys WHERE key_prefix LIKE %s LIMIT 1",
-                    (f"{_auth_key_prefix}%",),
+                    "SELECT client_id FROM client_api_keys WHERE key_prefix = %s LIMIT 1",
+                    (_auth_key_prefix,),
                 )
                 if _key_row:
                     _auth_client_id = _key_row["client_id"]
@@ -1005,10 +1113,15 @@ async def chat_completions(request: Request):
         real_ip = get_real_client_ip(request)
         if real_ip and client_id:
             key_prefix = client_info.get("key_prefix", "")
-            get_ip_monitor().record_request(real_ip, client_id, key_prefix=key_prefix,
-                                            user_agent=request.headers.get("user-agent", "")[:256])
-            # IP封禁检查
-            if get_ip_monitor().check_ip_blocked(real_ip):
+            # 记录IP信息含多次同步DB读写，改为限并发后台任务执行，不阻塞事件循环
+            _ip_monitor = get_ip_monitor()
+            _spawn_bg_task(asyncio.to_thread(
+                _ip_monitor.record_request, real_ip, client_id,
+                key_prefix=key_prefix,
+                user_agent=request.headers.get("user-agent", "")[:256],
+            ))
+            # IP封禁检查（走60秒内存缓存，需同步判定拦截）
+            if _ip_monitor.check_ip_blocked(real_ip):
                 await _log_request(
                     client_id=client_id, key_id="", model=model, status_code=403, rt=0,
                     prompt_tokens=0, completion_tokens=0, total_tokens=0,
@@ -1107,11 +1220,11 @@ async def chat_completions(request: Request):
     scheduler.record_client_request(client_id, model)
 
     # 4. 带重试的上游调用
-    raw_base_url = get_setting("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+    raw_base_url = await get_setting_cached("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
     base_url, url_warning = normalize_base_url(raw_base_url)
     if url_warning:
         logger.info(f"Base URL 标准化: {url_warning}")
-    chat_path = get_setting("chat_path") or "/chat/completions"
+    chat_path = await get_setting_cached("chat_path") or "/chat/completions"
     upstream_url = f"{base_url}{chat_path}"
     timeout = get_timeout_for_model(model)
 
@@ -1213,15 +1326,11 @@ def _log_request_sync(
     中间件层已记录基础日志，此函数用于补充业务层数据（client_id、key_id、token统计等）。
 
     Args:
-        gateway_dispatch_ms: 网关调度耗时(密钥选择时间, ms)。如果为0，自动从scheduler._last_dispatch_ms获取
+        gateway_dispatch_ms: 网关调度耗时(密钥选择时间, ms)。如果为0，自动从请求级 ContextVar 获取
     """
-    # 如果未传入gateway_dispatch_ms，尝试从scheduler获取
+    # 如果未传入gateway_dispatch_ms，从当前请求上下文取（无跨请求竞态）
     if gateway_dispatch_ms == 0.0:
-        try:
-            from app.scheduler import get_scheduler
-            gateway_dispatch_ms = getattr(get_scheduler(), '_last_dispatch_ms', 0.0)
-        except Exception:
-            gateway_dispatch_ms = 0.0
+        gateway_dispatch_ms = _dispatch_ms_var.get()
 
     try:
         from app.database import localnow
@@ -1291,8 +1400,9 @@ def _log_request_sync(
 
 
 async def _log_request(*args, **kwargs):
-    """异步包装器：将同步的 DB 写入操作放到线程池中执行，避免阻塞事件循环"""
-    await asyncio.to_thread(_log_request_sync, *args, **kwargs)
+    """异步包装器：日志写入改为fire-and-forget后台任务（全局Semaphore限并发16），
+    经线程池执行同步DB INSERT，不阻塞事件循环也不占用无界线程"""
+    _spawn_bg_task(asyncio.to_thread(_log_request_sync, *args, **kwargs))
 
 
 # ========== Embeddings带重试上游调用 ==========
@@ -1368,8 +1478,9 @@ async def _call_upstream_embeddings(scheduler, client_id, model, url, body):
     except Exception as e:
         rt = time.time() - start_time
         scheduler.record_response(key_id, model, False, rt, 0, "error")
+        logger.error(f"embeddings请求异常: key={key_id[:8]} model={model} error={e}", exc_info=True)
         raise HTTPException(status_code=500, detail={
-            "message": f"内部错误: {str(e)}",
+            "message": _safe_err_text(e, "内部错误"),
             "type": "internal_error",
             "code": "internal_error",
         })
@@ -1381,7 +1492,7 @@ async def _call_upstream_embeddings(scheduler, client_id, model, url, body):
 @router.post("/api/v1/embeddings", tags=["公共API"])
 async def embeddings(request: Request):
     """OpenAI兼容向量化端点（tenacity自动重试）"""
-    client_info = await asyncio.to_thread(authenticate_client, request)
+    client_info = await authenticate_client(request)
 
     try:
         body = await request.json()
@@ -1412,7 +1523,7 @@ async def embeddings(request: Request):
     scheduler = get_scheduler()
     await scheduler._ensure_pools()
 
-    base_url = get_setting("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+    base_url = await get_setting_cached("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
     url = f"{base_url}/embeddings"
 
     _emb_start_ts = time.time()

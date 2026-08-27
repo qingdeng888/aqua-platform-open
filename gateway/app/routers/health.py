@@ -30,6 +30,8 @@ class RuntimeHealthState:
     recent_success: int = 0
     recent_failure: int = 0
     recent_total: int = 0
+    # 最近计数上次衰减时间戳（配合 RECENT_HALF_LIFE 使用）
+    last_decay_ts: float = 0.0
     # 断路器级别 (0/1/2/3)
     breaker_level: int = 0
     breaker_until: float = 0.0
@@ -45,10 +47,14 @@ class RuntimeHealthState:
     COOLDOWN_LEVELS = [60, 300, 1800]  # 1min / 5min / 30min
     # 指数衰减半衰期（秒）
     PENALTY_HALF_LIFE = 600  # 10分钟
+    # 最近成功/失败计数半衰期（秒）
+    RECENT_HALF_LIFE = 1800  # 30分钟
 
     def record_success(self, latency_ms: float = 0.0):
         """记录成功"""
         now = time.time()
+        # 修复：宣称30分钟半衰期但原先从未衰减 —— 先衰减再计数
+        self._decay_recent(now)
         self.recent_success += 1
         self.recent_total += 1
         self.transient_streak = 0
@@ -76,6 +82,8 @@ class RuntimeHealthState:
         返回: 冷却秒数（0表示不需要冷却）
         """
         now = time.time()
+        # 修复：先按30分钟半衰期衰减，再计数
+        self._decay_recent(now)
         self.recent_failure += 1
         self.recent_total += 1
 
@@ -115,6 +123,7 @@ class RuntimeHealthState:
         """获取健康度乘数 (0.0~1.0)"""
         now = time.time()
         self._decay_penalty(now)
+        self._decay_recent(now)
 
         # 惩罚因子
         health = 1.0 / (1.0 + self.penalty_score)
@@ -143,6 +152,26 @@ class RuntimeHealthState:
             self.penalty_score *= 0.5 ** half_lives
             if self.penalty_score < 0.001:
                 self.penalty_score = 0.0
+
+    def _decay_recent(self, now: float):
+        """最近成功/失败计数按30分钟半衰期衰减
+
+        修复：注释宣称"半衰期30分钟"但原先没有任何衰减实现，
+        导致历史成功/失败计数无限累积、成功率被旧数据永久污染。
+        实现：每经过一个半衰期窗口计数减半（不足整窗按比例衰减），
+        首次调用只记录 last_decay_ts 不衰减。
+        """
+        if self.last_decay_ts <= 0:
+            self.last_decay_ts = now
+            return
+        elapsed = now - self.last_decay_ts
+        if elapsed <= 0:
+            return
+        factor = 0.5 ** (elapsed / self.RECENT_HALF_LIFE)
+        self.recent_success = int(self.recent_success * factor)
+        self.recent_failure = int(self.recent_failure * factor)
+        self.recent_total = int(self.recent_total * factor)
+        self.last_decay_ts = now
 
 
 class HealthProbeService:

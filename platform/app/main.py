@@ -24,9 +24,10 @@ if _env_path.exists():
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, FileResponse
+from fastapi.responses import Response, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.database import init_db, seed_defaults
 from app.admin_panel import create_admin
@@ -47,7 +48,7 @@ async def lifespan(app: FastAPI):
         await _get_http_pool()
         logger.info("[用户平台] v10.0 HTTP连接池已预热")
     except Exception as e:
-        logger.info(f"[用户平台] HTTP连接池预热失败(可降级): {e}")
+        logger.warning(f"[用户平台] HTTP连接池预热失败(可降级): {e}")
 
     yield
 
@@ -65,12 +66,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AQUA Platform",
-    version="10.0.0",
+    version="11.0.0",
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
     lifespan=lifespan,
 )
+
+# Session 中间件：SQLAdmin 管理面板（/platform/dbadmin）的 request.session 依赖
+_admin_session_secret = os.environ.get("ADMIN_SESSION_SECRET", "")
+if not _admin_session_secret:
+    import secrets as _secrets
+    _admin_session_secret = _secrets.token_hex(32)
+    logger.warning(
+        "[用户平台] ADMIN_SESSION_SECRET 未设置，SQLAdmin 会话密钥使用临时随机值（重启后已登录会话全部失效）"
+    )
+app.add_middleware(SessionMiddleware, secret_key=_admin_session_secret)
 
 # CORS - 白名单域名，避免 * 与 credentials 同时使用
 _cors_origins = os.environ.get(
@@ -109,17 +120,49 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
 app.add_middleware(NoCacheMiddleware)
 
 
+# ========== CSRF Origin 校验中间件 ==========
+#
+# 对 /api/* 的 POST/PUT/DELETE/PATCH 做同源校验：请求带 Origin 头时必须与 Host 同源，否则 403；
+# 无 Origin 头的非浏览器客户端（curl/SDK 等）放行。
+# 与前端 SameSite=lax cookie 构成双保险：即使 cookie 被跨站携带，Origin 不同也会被拒。
+
+class OriginCheckMiddleware(BaseHTTPMiddleware):
+    """CSRF 防护：校验写请求的 Origin 与 Host 同源"""
+
+    async def dispatch(self, request: Request, call_next):
+        if (
+            request.method in ("POST", "PUT", "DELETE", "PATCH")
+            and request.url.path.startswith("/api/")
+        ):
+            origin = request.headers.get("origin")
+            if origin:
+                # Origin 形如 https://host[:port]，与 Host 头（host[:port]）比对即可判定同源
+                from urllib.parse import urlparse
+                origin_netloc = urlparse(origin).netloc
+                host = request.headers.get("host", "")
+                if origin_netloc != host:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "跨站请求被拒绝（CSRF防护）"},
+                    )
+        return await call_next(request)
+
+
+app.add_middleware(OriginCheckMiddleware)
+
+
 # ========== 基础路由 ==========
 
 @app.get("/healthz", tags=["公共"])
 @app.get("/health", tags=["公共"])
 async def healthz(request: Request = None):
     """健康检查（支持网关健康探测）"""
-    # 数据库连通性检查
+    # 数据库连通性检查（同步DB经线程池执行，避免健康探测阻塞事件循环）
     db_ok = False
     try:
         from app.database import fetch_one
-        result = fetch_one("SELECT 1 as ok")
+        import asyncio
+        result = await asyncio.to_thread(fetch_one, "SELECT 1 as ok")
         db_ok = result and result.get("ok") == 1
     except Exception:
         pass

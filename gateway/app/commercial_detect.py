@@ -31,9 +31,18 @@ v9.2 新增特性：
   - Accept 头过窄或缺失（非浏览器行为）
   - 重复固定 User-Agent（脚本特征）
   - 缺少 Referer/Origin（CSRF合规性检查）
+
+接线状态说明（v10.1，避免下个维护者再踩坑）：
+- record_content / record_headers / check_rate_limit 目前**没有任何调用方**（未接线）：
+  维度4(语义相似度)、维度10(浏览器指纹)、维度11(请求头异常)因此恒无数据。
+- 置信度已按"有数据维度权重归一化"计算：无数据的维度不参与计分，
+  不会因恒0维度拉低数学上限（原先即使其余维度满分也无法超过69%）。
+- 特殊监控名单不再硬编码真实用户名，改读环境变量 AQUA_WATCHLIST
+  （逗号分隔的客户端名称，默认为空=不监控任何指定用户）。
 """
 import json
 import math
+import os
 import re
 import time
 import logging
@@ -43,6 +52,10 @@ from typing import Optional, Set, Dict
 from app.database import fetch_one, fetch_all, execute, utcnow, insert_audit
 
 logger = logging.getLogger("acu.commercial")
+
+# 特殊监控名单（v10.1修复：原代码硬编码真实用户名监控名单，已删除）
+# 通过环境变量 AQUA_WATCHLIST 配置，逗号分隔客户端名称，默认为空
+WATCHLIST = [w.strip().lower() for w in os.environ.get("AQUA_WATCHLIST", "").split(",") if w.strip()]
 
 
 class CommercialDetector:
@@ -800,21 +813,53 @@ class CommercialDetector:
         header_pattern_score = self._analyze_header_pattern(client_id)
         scores["header_pattern"] = header_pattern_score
 
-        # 综合置信度（十一维加权平均）
-        confidence = (
-            0.12 * interval_score +
-            0.08 * switch_score +
-            0.08 * concurrent_score +
-            0.12 * semantic_score +
-            0.08 * ip_distribution_score +
-            0.08 * burst_score +
-            0.12 * distillation_score +
-            0.05 * time_window_score +
-            0.08 * account_farm_score +
-            0.12 * browser_fp_score +
-            0.07 * header_pattern_score
-        )
-        confidence = int(min(100, max(0, confidence)))
+        # 综合置信度（十一维加权，v10.1修复：按"有数据维度"的权重归一化）
+        # 无数据的维度（如 record_content/record_headers 未接线导致恒0的维度）
+        # 不参与计分，confidence = weighted_sum / sum(available_weights)，
+        # 修复原先无数据维度权重恒0把数学上限压到69%的问题
+        dimension_weights = {
+            "interval": 0.12,
+            "switch": 0.08,
+            "concurrent": 0.08,
+            "semantic": 0.12,
+            "ip_distribution": 0.08,
+            "burst": 0.08,
+            "distillation": 0.12,
+            "time_window": 0.05,
+            "account_farm": 0.08,
+            "browser_fingerprint": 0.12,
+            "header_pattern": 0.07,
+        }
+        dimension_scores = {
+            "interval": interval_score,
+            "switch": switch_score,
+            "concurrent": concurrent_score,
+            "semantic": semantic_score,
+            "ip_distribution": ip_distribution_score,
+            "burst": burst_score,
+            "distillation": distillation_score,
+            "time_window": time_window_score,
+            "account_farm": account_farm_score,
+            "browser_fingerprint": browser_fp_score,
+            "header_pattern": header_pattern_score,
+        }
+        # 各维度数据可用性（阈值与对应分析器的最小样本要求一致）
+        available = {
+            "interval": len(metrics.request_intervals) >= 10,
+            "switch": len(metrics.model_switches) > 0,
+            "concurrent": True,  # 调度器实时计数，恒有数据
+            "semantic": len(self._fingerprint_cache.get(client_id, ())) >= 5,
+            "ip_distribution": bool(self._ip_timestamps.get(client_id)) or bool(self._ip_history.get(client_id)),
+            "burst": bool(api_key) and len(self._key_timestamps.get(api_key, ())) >= 10,
+            "distillation": len(self._token_ratio_cache.get(client_id, ())) >= 10,
+            "time_window": len(self._request_time_cache.get(client_id, ())) >= 20,
+            "account_farm": bool(self._ip_history.get(client_id)),
+            "browser_fingerprint": bool(self._ua_history.get(client_id)) or bool(self._header_history.get(client_id)),
+            "header_pattern": bool(self._header_history.get(client_id)) or bool(self._http_version_history.get(client_id)),
+        }
+        weighted_sum = sum(dimension_scores[d] * dimension_weights[d] for d in dimension_weights if available[d])
+        available_weight = sum(dimension_weights[d] for d in dimension_weights if available[d])
+        confidence = int(min(100, max(0, weighted_sum / available_weight))) if available_weight > 0 else 0
 
         # === v9.2: 高危行为详细日志 ===
         if confidence >= 70:
@@ -852,9 +897,8 @@ class CommercialDetector:
                 f"置信度={confidence} 维度详情: {dim_detail}"
             )
 
-            # v9.2: 特殊监控用户(maiBot, logarh, user111)高危行为特别标记
-            monitored_keywords = ["maibot", "logarh", "user111", "小涑a"]
-            if any(kw in (client_name or "").lower() for kw in monitored_keywords):
+            # v10.1修复: 特殊监控用户改为环境变量 AQUA_WATCHLIST 配置（文件头有说明），默认为空
+            if WATCHLIST and any(kw in (client_name or "").lower() for kw in WATCHLIST):
                 logger.error(
                     f"【特殊监控-高危】client={client_id[:12]} name={client_name} "
                     f"置信度={confidence} 风险等级={risk_level} "

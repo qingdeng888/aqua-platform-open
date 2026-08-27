@@ -84,8 +84,10 @@ class TTLCache:
     如：调度决策、密钥缓存、上游配置
     """
 
-    def __init__(self, default_ttl: float = 300.0):
+    def __init__(self, default_ttl: float = 300.0, maxsize: int = 10000):
         self._default_ttl = default_ttl
+        # v10.1修复：L2 原先无容量上限，键数量会随时间无限增长（内存泄漏），加上限
+        self._maxsize = maxsize
         self._cache: Dict[str, tuple[Any, float]] = {}
 
     def get(self, key: str) -> Optional[Any]:
@@ -99,9 +101,13 @@ class TTLCache:
         return value
 
     def set(self, key: str, value: Any, ttl: Optional[float] = None):
-        """设置缓存项"""
+        """设置缓存项（超过上限时按插入顺序淘汰最旧条目）"""
         expires = time.time() + (ttl if ttl is not None else self._default_ttl)
         self._cache[key] = (value, expires)
+        # FIFO淘汰最旧条目（dict保持插入顺序）
+        while len(self._cache) > self._maxsize:
+            oldest = next(iter(self._cache))
+            del self._cache[oldest]
 
     def get_or_set(self, key: str, factory: Callable[[], Any], ttl: Optional[float] = None) -> Any:
         """获取或设置（缓存穿透保护）"""

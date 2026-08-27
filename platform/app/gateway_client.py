@@ -15,6 +15,13 @@ import httpx
 
 logger = logging.getLogger("aqua.gateway")
 
+# 启动即提示：平台令牌缺失时所有网关管理API调用都会被拒（401），提前暴露配置问题
+if not os.environ.get("AQUA_PLATFORM_TOKEN"):
+    logger.error(
+        "[FATAL] 环境变量 AQUA_PLATFORM_TOKEN 未设置，平台调用网关管理API将全部返回401！"
+        "请在 .env 中配置网关颁发的平台令牌（apt_ 前缀）。"
+    )
+
 
 class GatewayClient:
     """ACU网关API客户端（v10.0: 注入共享连接池，避免每次调用新建连接）"""
@@ -25,7 +32,8 @@ class GatewayClient:
         platform_token: Optional[str] = None,
         http_pool: Optional[httpx.AsyncClient] = None,
     ):
-        self.base_url = base_url or os.environ.get("GW_BASE_URL", "http://127.0.0.1:8001")
+        # 默认指向网关8000端口（原默认8001是平台自身端口，会递归请求自己）
+        self.base_url = base_url or os.environ.get("GW_BASE_URL", "http://127.0.0.1:8000")
         self.platform_token = platform_token or os.environ.get("AQUA_PLATFORM_TOKEN", "")
         self._http_pool = http_pool
         self._own_pool = http_pool is None

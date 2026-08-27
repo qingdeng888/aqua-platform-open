@@ -1,3 +1,4 @@
+# 注意：本模块当前未接入主链路（独立文档解析适配器），修复保留待未来接线
 """
 龙虾文档适配模块 (Lobster Document Adapter)
 支持 PDF、DOCX、HTML 等格式文档的解析与上下文注入
@@ -5,12 +6,25 @@
 """
 
 import io
+import os
 import re
+import zipfile
 import logging
 from typing import Optional
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+# ========== 解析防护上限（修复：原先无任何大小限制，可被超大文件/zip炸弹打爆内存） ==========
+
+# 输入文档大小上限，默认 20MB，可用环境变量 LOBSTER_MAX_BYTES 覆盖
+LOBSTER_MAX_BYTES = int(os.environ.get("LOBSTER_MAX_BYTES", 20 * 1024 * 1024))
+# PDF 页数上限
+LOBSTER_MAX_PDF_PAGES = 500
+# docx(zip) 总未压缩体积 / 压缩体积 的膨胀比上限，超过视为 zip 炸弹
+LOBSTER_ZIP_RATIO_LIMIT = 100
+# docx(zip) 内部条目数上限
+LOBSTER_ZIP_MAX_ENTRIES = 200
 
 
 @dataclass
@@ -117,6 +131,15 @@ class LobsterDocAdapter:
         except ImportError:
             logger.warning("beautifulsoup4未安装,HTML解析不可用. pip install beautifulsoup4")
 
+    @staticmethod
+    def _check_size(content: bytes):
+        """读文件前的统一大小检查（修复：原先无限制）"""
+        if content is not None and len(content) > LOBSTER_MAX_BYTES:
+            raise ValueError(
+                f"文档过大: {len(content)} 字节，超过上限 "
+                f"{LOBSTER_MAX_BYTES} 字节（约{LOBSTER_MAX_BYTES // (1024 * 1024)}MB），拒绝解析"
+            )
+
     def parse(self, content: bytes, filename: str = "") -> ParsedDocument:
         """自动检测文件类型并解析"""
         ext = self._detect_extension(filename, content)
@@ -133,12 +156,18 @@ class LobsterDocAdapter:
 
     def parse_pdf(self, content: bytes) -> ParsedDocument:
         """解析PDF文档"""
+        self._check_size(content)  # 修复：读文件前检查大小上限
         if not self._pdf_available:
             return ParsedDocument(source_type="pdf", content="[PDF解析不可用: pypdf未安装]")
 
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(content))
+        # 修复：PDF 页数上限，防止全页解压把内存/CPU 打爆
+        if len(reader.pages) > LOBSTER_MAX_PDF_PAGES:
+            raise ValueError(
+                f"PDF页数过多: {len(reader.pages)} 页，超过上限 {LOBSTER_MAX_PDF_PAGES} 页，拒绝解析"
+            )
         doc = ParsedDocument(source_type="pdf")
         doc.metadata = {
             "pages": len(reader.pages),
@@ -160,8 +189,30 @@ class LobsterDocAdapter:
 
     def parse_docx(self, content: bytes) -> ParsedDocument:
         """解析DOCX文档"""
+        self._check_size(content)  # 修复：读文件前检查大小上限
         if not self._docx_available:
             return ParsedDocument(source_type="docx", content="[DOCX解析不可用: python-docx未安装]")
+
+        # 修复：docx 本质是 zip，解压前先做 zip 炸弹检查（膨胀比/条目数）
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                infos = zf.infolist()
+                if len(infos) > LOBSTER_ZIP_MAX_ENTRIES:
+                    raise ValueError(
+                        f"DOCX内部条目数过多: {len(infos)} 个，超过上限 "
+                        f"{LOBSTER_ZIP_MAX_ENTRIES} 个，疑似zip炸弹，拒绝解析"
+                    )
+                total_uncompressed = sum(i.file_size for i in infos)
+                total_compressed = sum(i.compress_size for i in infos)
+                if total_compressed > 0 and \
+                        total_uncompressed / total_compressed > LOBSTER_ZIP_RATIO_LIMIT:
+                    raise ValueError(
+                        f"DOCX解压膨胀比过高: 未压缩{total_uncompressed}/压缩{total_compressed}"
+                        f"（比值>{LOBSTER_ZIP_RATIO_LIMIT}），疑似zip炸弹，拒绝解析"
+                    )
+        except zipfile.BadZipFile:
+            # 非 zip 结构：交给 python-docx 自行报错
+            pass
 
         from docx import Document
 
@@ -211,6 +262,7 @@ class LobsterDocAdapter:
 
     def parse_html(self, content: bytes) -> ParsedDocument:
         """解析HTML文档"""
+        self._check_size(content)  # 修复：读文件前检查大小上限
         if not self._bs4_available:
             return ParsedDocument(source_type="html", content="[HTML解析不可用: beautifulsoup4未安装]")
 
@@ -263,6 +315,7 @@ class LobsterDocAdapter:
 
     def parse_text(self, content: bytes) -> ParsedDocument:
         """解析纯文本文件"""
+        self._check_size(content)  # 修复：读文件前检查大小上限
         text = content.decode("utf-8", errors="replace")
         doc = ParsedDocument(source_type="txt", content=text)
         doc._estimate_tokens()

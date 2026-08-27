@@ -6,6 +6,7 @@
 """
 import os
 
+from sqlalchemy.engine import URL
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # 数据库连接配置（从环境变量读取）
@@ -15,7 +16,16 @@ PG_DB = os.environ.get("PG_DB", "aqua_gateway")
 PG_USER = os.environ.get("PG_USER", "aqua")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
 
-DATABASE_URL = f"postgresql+asyncpg://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}"
+# v10.1修复：改用 URL.create 参数式构造。
+# 原先 f-string 直接拼接 DSN，密码含 @ : / # ? 等特殊字符时会破坏 URL 结构导致连接失败。
+DATABASE_URL = URL.create(
+    "postgresql+asyncpg",
+    username=PG_USER,
+    password=PG_PASSWORD,
+    host=PG_HOST,
+    port=int(PG_PORT),
+    database=PG_DB,
+)
 
 async_engine = create_async_engine(
     DATABASE_URL,

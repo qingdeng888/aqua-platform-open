@@ -4,6 +4,8 @@
 提供数据库表的 Web 管理界面，挂载于 /gw/dbadmin。
 使用与 admin_api.py 相同的管理员密码进行认证。
 """
+import hmac
+import logging
 import os
 
 from sqladmin import Admin, ModelView
@@ -30,16 +32,36 @@ from app.models import (
 # ========== 认证后端 ==========
 
 class AdminAuth(AuthenticationBackend):
-    """SQLAdmin 认证：使用 ACU_ADMIN_PASSWORD 环境变量"""
+    """SQLAdmin 认证：优先 ACU_ADMIN_PASSWORD_HASH（bcrypt），否则 ACU_ADMIN_PASSWORD（恒定时间比较）
+
+    v10.1修复：此前空密码可命中未配置的空环境变量（"" == ""）导致空密码登录；
+    现两者均未配置时拒绝一切登录（面板禁用，见 create_admin 的 [FATAL] 日志）。
+    """
 
     async def login(self, request: Request) -> bool:
         form = await request.form()
         username = form.get("username", "")
         password = form.get("password", "")
-        admin_password = os.environ.get("ACU_ADMIN_PASSWORD", "")
-        if password == admin_password:
-            request.session.update({"authenticated": True})
-            return True
+        if not isinstance(password, str):
+            password = ""
+        pw_hash = os.environ.get("ACU_ADMIN_PASSWORD_HASH", "").strip()
+        pw_plain = os.environ.get("ACU_ADMIN_PASSWORD", "")
+        if pw_hash:
+            try:
+                # bcrypt校验（12 rounds, 单次100-300ms CPU）经线程池执行，避免阻塞事件循环
+                import asyncio
+                if await asyncio.to_thread(bcrypt.checkpw, password.encode("utf-8"), pw_hash.encode("utf-8")):
+                    request.session.update({"authenticated": True})
+                    return True
+            except (ValueError, TypeError):
+                # 哈希格式非法（盐/长度不符）→ 视为配置错误，拒绝登录
+                return False
+            return False
+        if pw_plain:
+            if hmac.compare_digest(password.encode("utf-8"), pw_plain.encode("utf-8")):
+                request.session.update({"authenticated": True})
+                return True
+        # 均未配置（或明文比较失败）→ 拒绝登录
         return False
 
     async def logout(self, request: Request) -> bool:
@@ -56,8 +78,11 @@ class AdminSettingView(ModelView, model=AdminSetting):
     name = "管理设置"
     name_plural = "管理设置"
     icon = "fa-solid fa-gear"
-    column_list = [AdminSetting.key, AdminSetting.value, AdminSetting.updated_at]
+    # v10.1修复：value 列可能含 upstream_master_key/gateway_secret 等敏感值 → 列表/详情/表单均不展示
+    column_list = [AdminSetting.key, AdminSetting.updated_at]
     column_searchable_list = [AdminSetting.key]
+    column_details_exclude_list = [AdminSetting.value]
+    form_excluded_columns = [AdminSetting.value]
     can_delete = True
 
 
@@ -74,6 +99,8 @@ class UpstreamKeyView(ModelView, model=UpstreamKey):
     column_searchable_list = [UpstreamKey.name, UpstreamKey.provider]
     column_sortable_list = [UpstreamKey.name, UpstreamKey.weight, UpstreamKey.status]
     form_excluded_columns = [UpstreamKey.api_key_ciphertext]
+    # v10.1修复：详情页排除密钥密文，防密钥材料泄漏
+    column_details_exclude_list = [UpstreamKey.api_key_ciphertext]
     can_delete = True
 
 
@@ -96,6 +123,8 @@ class ClientApiKeyView(ModelView, model=ClientApiKey):
     ]
     column_searchable_list = [ClientApiKey.client_id]
     form_excluded_columns = [ClientApiKey.key_hash, ClientApiKey.key_ciphertext]
+    # v10.1修复：详情页排除哈希/密文，防密钥材料泄漏
+    column_details_exclude_list = [ClientApiKey.key_hash, ClientApiKey.key_ciphertext]
     can_delete = True
 
 
@@ -111,6 +140,8 @@ class RequestLogView(ModelView, model=RequestLog):
     column_searchable_list = [RequestLog.model, RequestLog.client_id]
     column_sortable_list = [RequestLog.created_at, RequestLog.latency_ms, RequestLog.status_code]
     column_default_sort = ("created_at", True)  # 降序
+    # 排除请求/响应体（含用户明文 prompt，详情页不应展示）
+    column_details_exclude_list = [RequestLog.request_body, RequestLog.response_body]
     can_create = False
     can_edit = False
     can_delete = True
@@ -141,6 +172,8 @@ class PlatformTokenView(ModelView, model=PlatformToken):
     ]
     column_searchable_list = [PlatformToken.name]
     form_excluded_columns = [PlatformToken.token_hash]
+    # v10.1修复：详情页排除令牌哈希，防密钥材料泄漏
+    column_details_exclude_list = [PlatformToken.token_hash]
     can_delete = True
 
 
@@ -189,6 +222,12 @@ class BucketSnapshotView(ModelView, model=BucketSnapshot):
 
 def create_admin(app=None) -> Admin:
     """创建 SQLAdmin 实例并注册所有模型"""
+    # v10.1修复：均未配置管理凭据时拒绝一切登录，启动时以 [FATAL] 明示面板已禁用
+    if not os.environ.get("ACU_ADMIN_PASSWORD_HASH") and not os.environ.get("ACU_ADMIN_PASSWORD"):
+        logging.getLogger("acu.gateway").error(
+            "[FATAL] 未配置 ACU_ADMIN_PASSWORD_HASH / ACU_ADMIN_PASSWORD，"
+            "SQLAdmin 数据库面板(/gw/dbadmin)已禁用所有登录"
+        )
     authentication_backend = AdminAuth(secret_key=os.environ.get("ADMIN_SESSION_SECRET", ""))
     admin = Admin(
         app=app,

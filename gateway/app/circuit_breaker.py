@@ -14,7 +14,7 @@
 """
 import time
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Tuple
 from threading import Lock
@@ -24,24 +24,53 @@ logger = logging.getLogger("acu.circuit_breaker")
 
 @dataclass
 class CircuitState:
-    """熔断器状态"""
+    """熔断器状态
+
+    v10.1修复：
+    - 新增滚动窗口记录 (timestamp, is_success)，失败率按窗口计算，不再终身累计
+    - open_until>0 且已过期为"半开"状态（原先半开不可达）
+    """
     failure_count: int = 0
     last_failure_time: float = 0.0
-    open_until: float = 0.0  # 熔断恢复时间戳
+    open_until: float = 0.0  # 熔断冷却截止时间戳（0=从未熔断或已完全恢复）
     total_requests: int = 0
     total_failures: int = 0
+    recent_results: deque = field(default_factory=lambda: deque(maxlen=1000))
 
     @property
     def is_open(self) -> bool:
         """熔断器是否打开（拒绝请求）"""
-        return time.time() < self.open_until
+        return self.open_until > 0 and time.time() < self.open_until
+
+    @property
+    def is_half_open(self) -> bool:
+        """是否处于半开状态（冷却期满，放行有限探测）"""
+        return self.open_until > 0 and time.time() >= self.open_until
+
+    def record(self, now: float, success: bool) -> None:
+        """记录一次请求结果（维护滚动窗口与计数）"""
+        self.recent_results.append((now, success))
+        self.total_requests += 1
+        if success:
+            self.failure_count = 0
+        else:
+            self.total_failures += 1
+            self.failure_count += 1
+            self.last_failure_time = now
+
+    def window_stats(self, window: float, now: float) -> Tuple[int, float]:
+        """统计滚动窗口内的 (请求数, 失败率)"""
+        results = [ok for ts, ok in self.recent_results if now - ts < window]
+        if not results:
+            return (0, 0.0)
+        failures = sum(1 for ok in results if not ok)
+        return (len(results), failures / len(results))
 
     @property
     def failure_rate(self) -> float:
-        """失败率"""
-        if self.total_requests == 0:
-            return 0.0
-        return self.total_failures / self.total_requests
+        """失败率（滚动窗口口径，默认60秒）"""
+        _, rate = self.window_stats(60.0, time.time())
+        return rate
 
 
 class CircuitBreaker:
@@ -70,6 +99,8 @@ class CircuitBreaker:
         self.recovery_timeout = recovery_timeout
         self.half_open_max = half_open_max
         self.min_requests_for_percentage = min_requests_for_percentage
+        # v10.1修复：失败率改为滚动窗口统计（秒），不再终身累计
+        self.failure_window = 60.0
         self._circuits: Dict[str, CircuitState] = {}
         self._lock = Lock()
         self._half_open_attempts: Dict[str, int] = defaultdict(int)
@@ -80,20 +111,28 @@ class CircuitBreaker:
         return self._circuits[key]
 
     def can_request(self, key: str) -> bool:
-        """检查是否允许请求通过"""
+        """检查是否允许请求通过
+
+        v10.1修复状态机（原实现 is_open 属性内含 now<open_until 判断，
+        进入该分支后 now>=open_until 恒为假，半开状态永远不可达）：
+        - CLOSED：直接放行
+        - OPEN（now < open_until）：拒绝
+        - HALF_OPEN（open_until>0 且 now>=open_until）：放行 half_open_max 个探测
+        """
         with self._lock:
             state = self._get_or_create(key)
             now = time.time()
 
-            if state.is_open:
-                # 熔断器打开中
-                if now >= state.open_until:
-                    # 进入半开状态，允许探测
-                    if self._half_open_attempts[key] < self.half_open_max:
-                        self._half_open_attempts[key] += 1
-                        logger.info(f"熔断器半开探测: key={key[:16]} attempts={self._half_open_attempts[key]}")
-                        return True
+            if state.open_until > 0:
+                if now < state.open_until:
+                    # 熔断打开中：直接拒绝
                     return False
+                # 冷却期满 → 半开状态：放行有限个探测请求
+                if self._half_open_attempts[key] < self.half_open_max:
+                    self._half_open_attempts[key] += 1
+                    logger.info(f"熔断器半开探测: key={key[:16]} attempts={self._half_open_attempts[key]}")
+                    return True
+                # 半开探测名额已用完，仍拒绝
                 return False
 
             # 熔断器关闭，允许请求
@@ -103,11 +142,10 @@ class CircuitBreaker:
         """记录成功请求"""
         with self._lock:
             state = self._get_or_create(key)
-            state.total_requests += 1
-            state.failure_count = 0
+            state.record(time.time(), True)
 
-            # 如果在半开状态，成功则关闭熔断器
-            if state.open_until > 0 and self._half_open_attempts[key] > 0:
+            # 半开探测成功 → 关闭熔断器（完全恢复）
+            if state.open_until > 0:
                 state.open_until = 0
                 self._half_open_attempts[key] = 0
                 logger.info(f"熔断器恢复: key={key[:16]} (半开探测成功)")
@@ -117,10 +155,17 @@ class CircuitBreaker:
         with self._lock:
             state = self._get_or_create(key)
             now = time.time()
-            state.total_requests += 1
-            state.total_failures += 1
-            state.failure_count += 1
-            state.last_failure_time = now
+            state.record(now, False)
+
+            # 半开探测失败 → 重新熔断（重新计算冷却时间）
+            if state.open_until > 0:
+                state.open_until = now + self.recovery_timeout
+                self._half_open_attempts[key] = 0
+                logger.warning(
+                    f"熔断器重新打开: key={key[:16]} reason=半开探测失败 "
+                    f"recovery={self.recovery_timeout}s error={error_type}"
+                )
+                return
 
             # 检查是否需要熔断
             should_open = False
@@ -131,14 +176,17 @@ class CircuitBreaker:
                 should_open = True
                 reason = f"连续失败{state.failure_count}次"
 
-            # 条件2：失败率超过阈值（需要足够样本量）
-            if (state.total_requests >= self.min_requests_for_percentage and
-                    state.failure_rate >= self.failure_threshold_percentage):
-                should_open = True
-                reason = f"失败率{state.failure_rate:.0%}(>{self.failure_threshold_percentage:.0%})"
+            # 条件2：滚动窗口失败率超过阈值（需要足够样本量）
+            if not should_open:
+                window_requests, window_rate = state.window_stats(self.failure_window, now)
+                if (window_requests >= self.min_requests_for_percentage and
+                        window_rate >= self.failure_threshold_percentage):
+                    should_open = True
+                    reason = f"窗口失败率{window_rate:.0%}(>{self.failure_threshold_percentage:.0%})"
 
             if should_open:
                 state.open_until = now + self.recovery_timeout
+                self._half_open_attempts[key] = 0
                 logger.warning(
                     f"熔断器打开: key={key[:16]} reason={reason} "
                     f"recovery={self.recovery_timeout}s error={error_type}"
@@ -158,6 +206,13 @@ class CircuitBreaker:
                     "failure_count": state.failure_count,
                     "failure_rate": round(state.failure_rate, 4),
                     "recovery_in_seconds": round(remaining, 1),
+                }
+            if state.is_half_open:
+                return {
+                    "status": "half_open",
+                    "failure_count": state.failure_count,
+                    "failure_rate": round(state.failure_rate, 4),
+                    "half_open_attempts": self._half_open_attempts.get(key, 0),
                 }
             return {
                 "status": "closed",
@@ -191,6 +246,13 @@ class CircuitBreaker:
                         "failure_count": state.failure_count,
                         "failure_rate": round(state.failure_rate, 4),
                         "recovery_in_seconds": round(remaining, 1),
+                    }
+                elif state.is_half_open:
+                    result[k] = {
+                        "status": "half_open",
+                        "failure_count": state.failure_count,
+                        "failure_rate": round(state.failure_rate, 4),
+                        "half_open_attempts": self._half_open_attempts.get(k, 0),
                     }
                 else:
                     result[k] = {

@@ -1,39 +1,12 @@
 """公开页面路由 - 首页/模型列表/API文档/公共统计"""
-import os
 import logging
 from pathlib import Path
 
-import psycopg2
-import psycopg2.extras
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 router = APIRouter(tags=["公开页面"])
 logger = logging.getLogger("aqua.public")
-
-# 网关数据库连接配置
-_PG_GW_HOST = os.environ.get("PG_GATEWAY_HOST", "localhost")
-_PG_GW_PORT = int(os.environ.get("PG_GATEWAY_PORT", "5432"))
-_PG_GW_DB = os.environ.get("PG_GATEWAY_DB", "aqua_gateway")
-_PG_GW_USER = os.environ.get("PG_GATEWAY_USER", "aqua")
-_PG_GW_PASS = os.environ.get("PG_GATEWAY_PASSWORD", "")
-
-
-def _gw_fetch_one(sql: str, params: tuple = ()):
-    """查询网关数据库单条记录"""
-    try:
-        conn = psycopg2.connect(
-            host=_PG_GW_HOST, port=_PG_GW_PORT, dbname=_PG_GW_DB,
-            user=_PG_GW_USER, password=_PG_GW_PASS,
-        )
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(sql, params)
-        row = cur.fetchone()
-        conn.close()
-        return dict(row) if row else None
-    except Exception as e:
-        logger.warning(f"查询网关数据库失败: {e}")
-        return None
 
 SPA_HTML_PATH = Path(__file__).resolve().parents[1] / "static" / "index.html"
 
@@ -141,13 +114,10 @@ async def admin_page():
 
 @router.get("/api/public/stats", tags=["公共API"])
 async def public_stats():
-    """返回首页统计数据（实时从数据库读取）"""
-    # 上游密钥数
-    key_row = _gw_fetch_one(
-        "SELECT count(*) as cnt FROM upstream_keys WHERE status='active'"
-    )
-    upstream_keys = key_row["cnt"] if key_row else 0
+    """返回首页统计数据
 
+    仅暴露非敏感状态字段；注册用户数、活跃上游密钥数等经营数据已移除（防竞品探测）。
+    """
     # 可用模型数（来自网关缓存的已验证模型列表）
     models_count = 0
     try:
@@ -166,14 +136,7 @@ async def public_stats():
     # 调度算法数（固定值）
     algorithms = 17
 
-    # 注册用户数
-    from app.database import fetch_one
-    user_row = fetch_one("SELECT count(*) as cnt FROM users")
-    users = user_row["cnt"] if user_row else 0
-
     return {
         "models": models_count or 54,
-        "upstream_keys": upstream_keys,
         "algorithms": algorithms,
-        "users": users,
     }

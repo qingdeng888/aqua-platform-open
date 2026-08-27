@@ -1,3 +1,4 @@
+# 注意：本模块当前未接入主链路（v10 快照），修复保留待未来接线
 """
 慷慨型网关模块 (Generous Gateway Module)
 设计理念: 不限量、不限速
@@ -154,18 +155,33 @@ class GenerousLoadBalancer:
         return candidates[0][1]
     
     def report_success(self, provider_id: str, latency_ms: int, tokens: int):
-        """报告请求成功"""
+        """报告请求成功
+
+        修复（死锁）：原实现持 self._pool._lock 后调用 consume_quota()，
+        而 consume_quota 内部会再取同一把非重入 threading.Lock → 必然死锁。
+        选"锁外调用"而非改 RLock：consume_quota 本就是自带加锁的公开方法，
+        锁外调用保持 Lock 的严格性（未来误嵌套会立刻暴露而非被 RLock 静默掩盖）。
+        """
         with self._pool._lock:
             provider = self._pool._providers.get(provider_id)
-            if provider:
-                provider.consecutive_errors = 0
-                provider.last_success_time = time.time()
-                provider.avg_latency_ms = int(
-                    0.8 * provider.avg_latency_ms + 0.2 * latency_ms
-                ) if provider.avg_latency_ms > 0 else latency_ms
-                self._pool.consume_quota(provider_id, tokens)
-                if provider.status == ProviderStatus.DEGRADED:
-                    provider.status = ProviderStatus.HEALTHY
+            if not provider:
+                return
+            provider.consecutive_errors = 0
+            provider.last_success_time = time.time()
+            provider.avg_latency_ms = int(
+                0.8 * provider.avg_latency_ms + 0.2 * latency_ms
+            ) if provider.avg_latency_ms > 0 else latency_ms
+            # 修复（DOWN 永不恢复）：成功时按 DOWN → DEGRADED → HEALTHY 逐级恢复
+            # （原先只在 DEGRADED 时恢复为 HEALTHY，DOWN 状态没有出口）
+            if provider.status == ProviderStatus.DOWN:
+                provider.status = ProviderStatus.DEGRADED
+                logger.info(f"供应商 {provider.name} 从DOWN恢复为DEGRADED")
+            elif provider.status == ProviderStatus.DEGRADED:
+                provider.status = ProviderStatus.HEALTHY
+                logger.info(f"供应商 {provider.name} 从DEGRADED恢复为HEALTHY")
+
+        # 锁外调用 consume_quota（其内部自行加锁；供应商在间隙被注销时它会安全返回 False）
+        self._pool.consume_quota(provider_id, tokens)
     
     def report_error(self, provider_id: str, is_5xx: bool = False):
         """报告请求失败,触发故障转移逻辑"""

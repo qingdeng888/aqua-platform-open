@@ -12,6 +12,7 @@
 """
 import asyncio
 import os
+import secrets
 import time
 import logging
 from contextlib import asynccontextmanager
@@ -29,12 +30,13 @@ if _env_path.exists():
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
-from app.database import init_db, seed_defaults, utcnow
+from app.database import init_db, seed_defaults, utcnow_minus, warmup_pool, POOL_MAXCONN  # utcnow_minus 为契约函数（由 database.py 提供）
 from app.middleware import setup_middleware, is_maintenance_mode, start_log_worker, stop_log_worker
 from app.scheduler import get_scheduler
 from app.public_api import router as public_router
-from app.admin_api import router as admin_router
+from app.admin_api import router as admin_router, require_admin
 from app.admin_panel import create_admin
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -59,7 +61,7 @@ async def run_background_tasks():
         try:
             await scheduler.run_background_tasks()
         except Exception as e:
-            logger.info(f"[网关] 后台任务异常: {e}")
+            logger.error(f"[网关] 后台任务异常: {e}")
 
         # 每5分钟执行IP监控统计更新和商用检测分析
         now = time.time()
@@ -67,31 +69,36 @@ async def run_background_tasks():
             _last_monitor_time = now
             try:
                 # 从request_logs同步最近5分钟的数据到IP监控
+                # 查询+逐条落库均为同步DB，整体打包进线程池执行，避免阻塞事件循环
                 ip_monitor = get_ip_monitor()
                 from app.database import fetch_all
-                recent_ips = fetch_all(
-                    "SELECT DISTINCT client_ip, client_id, user_agent FROM request_logs "
-                    "WHERE created_at >= %s AND client_ip != '' AND client_id != ''",
-                    (utcnow(),),
-                )
-                for row in recent_ips:
-                    ip_monitor.record_request(
-                        row.get("client_ip", ""),
-                        row.get("client_id", ""),
-                        row.get("user_agent", ""),
+
+                def _sync_ip_monitor():
+                    recent_ips = fetch_all(
+                        "SELECT DISTINCT client_ip, client_id, user_agent FROM request_logs "
+                        "WHERE created_at >= %s AND client_ip != '' AND client_id != ''",
+                        (utcnow_minus(300),),  # v10.1修复：最近5分钟（此前 utcnow() 误拉全部历史）
                     )
+                    for row in recent_ips:
+                        ip_monitor.record_request(
+                            row.get("client_ip", ""),
+                            row.get("client_id", ""),
+                            row.get("user_agent", ""),
+                        )
+
+                await asyncio.to_thread(_sync_ip_monitor)
                 logger.info(f"[网关] IP监控统计已更新")
             except Exception as e:
-                logger.info(f"[网关] IP监控更新失败: {e}")
+                logger.error(f"[网关] IP监控更新失败: {e}")
 
             try:
-                # 运行商用检测周期分析
+                # 运行商用检测周期分析（内部含同步DB读写，经线程池执行）
                 detector = get_detector()
-                results = detector.run_periodic_analysis()
+                results = await asyncio.to_thread(detector.run_periodic_analysis)
                 if results:
                     logger.info(f"[网关] 商用检测周期分析完成: {len(results)} 个客户端")
             except Exception as e:
-                logger.info(f"[网关] 商用检测周期分析失败: {e}")
+                logger.error(f"[网关] 商用检测周期分析失败: {e}")
 
         # 每30秒执行一次（各算法内部有独立的周期控制）
         await asyncio.sleep(30)
@@ -109,10 +116,32 @@ async def lifespan(app: FastAPI):
     seed_defaults()
     logger.info("[网关] 数据库初始化完成")
 
+    # 连接池预热：取放3条连接摊平首请求建连开销（maxconn 可经 GW_DB_POOL_SIZE 配置）
+    try:
+        warmup_pool(3)
+    except Exception as e:
+        logger.warning(f"[网关] 连接池预热失败(不影响启动): {e}")
+
     # 初始化调度器HTTP连接池
     scheduler = get_scheduler()
     await scheduler._ensure_pools()
     logger.info("[网关] HTTP连接池已创建")
+
+    # 预热设置缓存：预填 public_api 热路径的关键配置key，避免首个请求缓存miss查库
+    try:
+        from app.public_api import get_setting_cached
+        for _key in ("upstream_base_url", "chat_path", "models_path"):
+            await get_setting_cached(_key)
+        logger.info("[网关] 设置缓存已预热(upstream_base_url/chat_path/models_path, TTL 60s)")
+    except Exception as e:
+        logger.warning(f"[网关] 设置缓存预热失败(不影响启动): {e}")
+
+    # 启动摘要：连接池规格 + 关键异步能力一览
+    logger.info(
+        f"[网关] 启动完成: DB池 maxconn={POOL_MAXCONN}(GW_DB_POOL_SIZE可调) "
+        f"HTTP池 limits=100/keepalive20/60s http2=off | 设置缓存TTL=60s | "
+        f"日志写入/认证查询均已 to_thread 化"
+    )
 
     # 启动后台任务
     _background_task = asyncio.create_task(run_background_tasks())
@@ -190,7 +219,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AQUA AI Gateway",
-    version="10.0.0",
+    version="11.0.0",
     description="多平台AI API网关 | 17算法互锁调度 | 平台适配器 | 智能路由 | 协议转换 | 运行时健康追踪",
     docs_url=None,
     redoc_url=None,
@@ -200,6 +229,13 @@ app = FastAPI(
 
 # 注册中间件
 setup_middleware(app)
+
+# v10.1修复：SQLAdmin 登录依赖 session，必须注册 SessionMiddleware（否则登录必 AssertionError）
+_admin_session_secret = os.environ.get("ADMIN_SESSION_SECRET")
+if not _admin_session_secret:
+    _admin_session_secret = secrets.token_hex(32)
+    logger.warning("[网关] 未设置 ADMIN_SESSION_SECRET，已临时生成会话密钥（重启后所有面板会话失效），建议配置该环境变量")
+app.add_middleware(SessionMiddleware, secret_key=_admin_session_secret)
 
 # 挂载静态文件目录
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -265,32 +301,48 @@ async def gateway_error_handler(request: Request, exc: GatewayError):
 # ========== 基础路由 ==========
 
 @app.get("/healthz", tags=["公共"])
-async def healthz():
-    """健康检查"""
+async def healthz(request: Request):
+    """健康检查（公开响应仅暴露基础状态；运营数据需 ?verbose=1 且带管理员凭据）"""
     scheduler = get_scheduler()
-    status = scheduler.get_global_status()
-    resource = scheduler.get_resource_status()  # New method
-    # v10.0: 获取熔断器状态
-    try:
-        from app.circuit_breaker import get_circuit_breaker
-        cb = get_circuit_breaker()
-        cb_status = cb.get_all_status()
-        open_circuits = {k: v for k, v in cb_status.items() if v.get("status") == "open"}
-    except Exception:
-        open_circuits = {}
-    return {
+    # get_global_status 内部含DB查询（活跃密钥数），经线程池执行避免高频健康探测阻塞事件循环
+    status = await asyncio.to_thread(scheduler.get_global_status)
+
+    # v10.1修复：healthy_keys/resources/circuit_breakers 等运营数据仅管理员可见，防匿名探测
+    verbose = request.query_params.get("verbose", "") in ("1", "true", "yes")
+    if verbose:
+        try:
+            await require_admin(request)
+        except HTTPException:
+            verbose = False  # 未授权（401/403）时忽略 verbose，回落公开响应
+
+    result = {
         "status": "ok",
         "version": "10.0.0",
         "maintenance_mode": is_maintenance_mode(),
         "degraded_mode": status["degraded_mode"],
-        "healthy_keys": status["healthy_key_count"],
-        "resources": resource,
-        "circuit_breakers": {
-            "total": len(cb_status) if 'cb_status' in dir() else 0,
-            "open": len(open_circuits),
-            "open_details": open_circuits if open_circuits else {},
-        },
     }
+    if verbose:
+        resource = scheduler.get_resource_status()  # New method
+        # v10.0: 获取熔断器状态（v10.1修复：try前初始化，替代 'cb_status' in dir() hack）
+        cb_status = {}
+        open_circuits = {}
+        try:
+            from app.circuit_breaker import get_circuit_breaker
+            cb = get_circuit_breaker()
+            cb_status = cb.get_all_status()
+            open_circuits = {k: v for k, v in cb_status.items() if v.get("status") == "open"}
+        except Exception:
+            pass
+        result.update({
+            "healthy_keys": status["healthy_key_count"],
+            "resources": resource,
+            "circuit_breakers": {
+                "total": len(cb_status),
+                "open": len(open_circuits),
+                "open_details": open_circuits if open_circuits else {},
+            },
+        })
+    return result
 
 
 @app.get("/robots.txt", tags=["公共"])

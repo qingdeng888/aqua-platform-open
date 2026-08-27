@@ -17,6 +17,8 @@
 # ===== Python =====
 .venv/
 venv/
+.venv-test/
+.pytest_cache/
 __pycache__/
 *.py[cod]
 *.po

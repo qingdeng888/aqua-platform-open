@@ -16,6 +16,7 @@
 - 商用识别: /gw/admin/commercial-detection
 - 接口调试: /gw/admin/debug/test
 """
+import asyncio
 import json
 import os
 import bcrypt
@@ -41,7 +42,7 @@ from app.security import (
     generate_platform_token,
 )
 from app.scheduler import get_scheduler, get_threshold_for_model
-from app.public_api import _VERIFIED_WORKING_MODELS
+from app.public_api import _VERIFIED_WORKING_MODELS, _clear_settings_cache
 from app.middleware import (
     is_maintenance_mode, set_maintenance_mode,
     _login_rate_limiter, _admin_rate_limiter, get_client_ip,
@@ -96,7 +97,7 @@ class PolicyUpdateRequest(BaseModel):
 
 class PlatformTokenCreateRequest(BaseModel):
     name: str
-    scopes: List[str]
+    scopes: Optional[List[str]] = None  # 缺省时使用 DEFAULT_PLATFORM_SCOPES（见下方）
     expires_at: Optional[str] = None
 
 class DebugChatRequest(BaseModel):
@@ -125,7 +126,8 @@ async def require_admin(request: Request):
     # 平台令牌鉴权（apt_ 前缀）
     if token.startswith("apt_"):
         token_hash = hash_secret(token)
-        row = fetch_one(
+        row = await asyncio.to_thread(
+            fetch_one,
             "SELECT * FROM platform_tokens WHERE token_hash = %s AND status = 'active'",
             (token_hash,),
         )
@@ -137,14 +139,16 @@ async def require_admin(request: Request):
             raise HTTPException(status_code=401, detail={
                 "message": "平台令牌已过期", "type": "unauthorized", "code": "expired_platform_token"
             })
-        execute("UPDATE platform_tokens SET last_used_at = %s WHERE id = %s", (utcnow(), row["id"]))
+        await asyncio.to_thread(
+            execute, "UPDATE platform_tokens SET last_used_at = %s WHERE id = %s", (utcnow(), row["id"])
+        )
         request.state.auth_type = "platform"
         request.state.platform_token = dict(row)
         request.state.platform_scopes = json.loads(row["scopes"])
         return
 
     # 传统管理员Token鉴权
-    secret = get_setting("gateway_secret")
+    secret = await asyncio.to_thread(get_setting, "gateway_secret")
     if not secret or not verify_admin_token(token, secret):
         raise HTTPException(status_code=401, detail={
             "message": "Token无效或已过期", "type": "unauthorized", "code": "invalid_token"
@@ -152,6 +156,45 @@ async def require_admin(request: Request):
     request.state.auth_type = "admin"
     request.state.platform_token = None
     request.state.platform_scopes = None
+
+
+# ========== 平台令牌scope强制（apt_令牌的最小权限控制） ==========
+
+# 敏感端点 → 所需scope映射（管理员Token不受限，仅平台令牌校验）
+SENSITIVE_SCOPES = {
+    "reveal_upstream_key": "upstreams:reveal",  # 查看上游密钥明文
+    "reveal_client_key": "keys:reveal",         # 查看客户密钥明文（平台回填/展示需要）
+    "save_settings": "settings:write",          # 修改网关策略
+    "delete_client": "clients:delete",          # 删除下游客户
+}
+
+# 新建平台令牌的默认scope（依据 platform/app/gateway_client.py 实际调用的 /gw/admin/* 端点）：
+# - clients:write  → POST /clients（创建客户，auth.py/console.py）
+# - keys:write     → POST/PUT/DELETE /clients/{id}/keys（发key核心流程）
+# - keys:reveal    → GET .../keys/{kid}/reveal（console.py/chat.py 密钥展示与本地丢失后的回填恢复）
+# - models:read    → GET /models/status（console.py 模型状态）
+# 刻意不含：clients:delete（仅platform_admin删用户时的best-effort同步）、
+# settings:write（平台从不写网关配置）、upstreams:reveal（上游密钥明文与平台无关）
+DEFAULT_PLATFORM_SCOPES = ["clients:write", "keys:write", "keys:reveal", "models:read"]
+
+
+def _require_platform_scope(request: Request, required: str):
+    """平台令牌调用敏感端点时强制校验scope，缺失返回403；管理员Token不受限"""
+    if getattr(request.state, "auth_type", None) != "platform":
+        return
+    scopes = getattr(request.state, "platform_scopes", None) or []
+    if required not in scopes:
+        raise HTTPException(status_code=403, detail={
+            "message": f"平台令牌缺少所需权限: {required}",
+            "type": "forbidden",
+            "code": "insufficient_scope",
+        })
+
+
+# LIKE搜索通配符转义（防 %/_ 注入导致全表扫描或匹配逃逸）
+def _like_escape(s: str) -> str:
+    """转义LIKE模式中的 % 与 _（配合SQL里的 ESCAPE '\\' 使用）"""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 # ========== 管理员登录 ==========
@@ -170,12 +213,16 @@ async def admin_login(req: LoginRequest, request: Request):
         })
 
 
-    if not bcrypt.checkpw(req.password.encode("utf-8"), ADMIN_PASSWORD_HASH.encode("utf-8")):
+    # bcrypt校验（12 rounds, 单次100-300ms CPU）与DB读写均经线程池执行，避免阻塞事件循环
+    password_ok = await asyncio.to_thread(
+        bcrypt.checkpw, req.password.encode("utf-8"), ADMIN_PASSWORD_HASH.encode("utf-8")
+    )
+    if not password_ok:
         raise HTTPException(status_code=401, detail={
             "message": "密码错误", "type": "unauthorized", "code": "wrong_password"
         })
 
-    secret = get_setting("gateway_secret")
+    secret = await asyncio.to_thread(get_setting, "gateway_secret")
     token = create_admin_token(secret)
 
     response = JSONResponse(content={
@@ -184,9 +231,9 @@ async def admin_login(req: LoginRequest, request: Request):
     })
     response.set_cookie(
         key="admin_token", value=token,
-        httponly=True, max_age=86400, samesite="lax",
+        httponly=True, max_age=86400, samesite="lax", secure=True,
     )
-    insert_audit("login", "admin", "", "管理员登录")
+    await asyncio.to_thread(insert_audit, "login", "admin", "", "管理员登录")
     return response
 
 
@@ -202,62 +249,67 @@ async def dashboard(request: Request):
     today_start = today_start_utc()
     seven_days_ago = days_ago_utc(7)
 
-    # 今日统计
-    today_stats = fetch_one(
-        "SELECT COUNT(*) as total_requests, "
-        "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success_count, "
-        "SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END) as count_429, "
-        "SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) as count_5xx, "
-        "SUM(CASE WHEN status_code = 401 THEN 1 ELSE 0 END) as count_401, "
-        "SUM(CASE WHEN status_code = 403 THEN 1 ELSE 0 END) as count_403, "
-        "SUM(CASE WHEN status_code = 400 THEN 1 ELSE 0 END) as count_400, "
-        "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as count_200, "
-        "SUM(prompt_tokens) as prompt_tokens, "
-        "SUM(completion_tokens) as completion_tokens, "
-        "SUM(total_tokens) as total_tokens, "
-        "AVG(latency_ms) as avg_latency, "
-        "SUM(CASE WHEN is_stream = 1 THEN 1 ELSE 0 END) as stream_count "
-        "FROM request_logs WHERE created_at >= %s",
-        (today_start,),
-    )
+    # 仪表盘6条聚合查询打包为单个同步函数，整体一次 to_thread 执行（避免逐条调度开销）
+    def _dashboard_queries():
+        # 今日统计
+        today_stats = fetch_one(
+            "SELECT COUNT(*) as total_requests, "
+            "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success_count, "
+            "SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END) as count_429, "
+            "SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) as count_5xx, "
+            "SUM(CASE WHEN status_code = 401 THEN 1 ELSE 0 END) as count_401, "
+            "SUM(CASE WHEN status_code = 403 THEN 1 ELSE 0 END) as count_403, "
+            "SUM(CASE WHEN status_code = 400 THEN 1 ELSE 0 END) as count_400, "
+            "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as count_200, "
+            "SUM(prompt_tokens) as prompt_tokens, "
+            "SUM(completion_tokens) as completion_tokens, "
+            "SUM(total_tokens) as total_tokens, "
+            "AVG(latency_ms) as avg_latency, "
+            "SUM(CASE WHEN is_stream = 1 THEN 1 ELSE 0 END) as stream_count "
+            "FROM request_logs WHERE created_at >= %s",
+            (today_start,),
+        )
+        # 历史统计
+        total_stats = fetch_one(
+            "SELECT COUNT(*) as total_requests, "
+            "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success_count, "
+            "SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END) as count_429, "
+            "SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) as count_5xx, "
+            "SUM(CASE WHEN status_code = 401 THEN 1 ELSE 0 END) as count_401, "
+            "SUM(CASE WHEN status_code = 403 THEN 1 ELSE 0 END) as count_403, "
+            "SUM(CASE WHEN status_code = 400 THEN 1 ELSE 0 END) as count_400, "
+            "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as count_200, "
+            "SUM(prompt_tokens) as prompt_tokens, "
+            "SUM(completion_tokens) as completion_tokens, "
+            "SUM(total_tokens) as total_tokens, "
+            "AVG(latency_ms) as avg_latency, "
+            "SUM(CASE WHEN is_stream = 1 THEN 1 ELSE 0 END) as stream_count "
+            "FROM request_logs"
+        )
+        # 活跃密钥和客户数
+        active_keys = fetch_one("SELECT COUNT(*) as cnt FROM upstream_keys WHERE status='active'")["cnt"]
+        active_clients = fetch_one("SELECT COUNT(*) as cnt FROM clients WHERE status='active'")["cnt"]
+        # 7天趋势（PostgreSQL：将UTC时间转为CST+8日期分组）
+        trend = fetch_all(
+            "SELECT (created_at::timestamptz AT TIME ZONE 'Asia/Shanghai')::date as date, COUNT(*) as requests, "
+            "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success "
+            "FROM request_logs WHERE created_at >= %s "
+            "GROUP BY (created_at::timestamptz AT TIME ZONE 'Asia/Shanghai')::date ORDER BY date",
+            (seven_days_ago,),
+        )
+        # 模型分布（今日，过滤空模型名）
+        model_dist = fetch_all(
+            "SELECT model, COUNT(*) as count FROM request_logs "
+            "WHERE created_at >= %s AND model IS NOT NULL AND model != '' GROUP BY model ORDER BY count DESC LIMIT 10",
+            (today_start,),
+        )
+        return today_stats, total_stats, active_keys, active_clients, trend, model_dist
 
-    # 历史统计
-    total_stats = fetch_one(
-        "SELECT COUNT(*) as total_requests, "
-        "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success_count, "
-        "SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END) as count_429, "
-        "SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END) as count_5xx, "
-        "SUM(CASE WHEN status_code = 401 THEN 1 ELSE 0 END) as count_401, "
-        "SUM(CASE WHEN status_code = 403 THEN 1 ELSE 0 END) as count_403, "
-        "SUM(CASE WHEN status_code = 400 THEN 1 ELSE 0 END) as count_400, "
-        "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as count_200, "
-        "SUM(prompt_tokens) as prompt_tokens, "
-        "SUM(completion_tokens) as completion_tokens, "
-        "SUM(total_tokens) as total_tokens, "
-        "AVG(latency_ms) as avg_latency, "
-        "SUM(CASE WHEN is_stream = 1 THEN 1 ELSE 0 END) as stream_count "
-        "FROM request_logs"
-    )
+    today_stats, total_stats, active_keys, active_clients, trend, model_dist = await asyncio.to_thread(_dashboard_queries)
 
-    # 活跃密钥和客户数
-    active_keys = fetch_one("SELECT COUNT(*) as cnt FROM upstream_keys WHERE status='active'")["cnt"]
-    active_clients = fetch_one("SELECT COUNT(*) as cnt FROM clients WHERE status='active'")["cnt"]
-
-    # 7天趋势（PostgreSQL：将UTC时间转为CST+8日期分组）
-    trend = fetch_all(
-        "SELECT (created_at::timestamptz AT TIME ZONE 'Asia/Shanghai')::date as date, COUNT(*) as requests, "
-        "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success "
-        "FROM request_logs WHERE created_at >= %s "
-        "GROUP BY (created_at::timestamptz AT TIME ZONE 'Asia/Shanghai')::date ORDER BY date",
-        (seven_days_ago,),
-    )
-
-    # 模型分布（今日，过滤空模型名）
-    model_dist = fetch_all(
-        "SELECT model, COUNT(*) as count FROM request_logs "
-        "WHERE created_at >= %s AND model IS NOT NULL AND model != '' GROUP BY model ORDER BY count DESC LIMIT 10",
-        (today_start,),
-    )
+    # 调度器全局状态（内部含DB查询，经线程池执行）
+    scheduler = get_scheduler()
+    global_status = await asyncio.to_thread(scheduler.get_global_status)
     # v10.0: 添加 display_name（友好名称）
     try:
         from app.nim_models import NIM_MODEL_CATALOG
@@ -270,10 +322,6 @@ async def dashboard(request: Request):
     except ImportError:
         for md in model_dist:
             md["display_name"] = md["model"]
-
-    # 调度器全局状态
-    scheduler = get_scheduler()
-    global_status = scheduler.get_global_status()
 
     success_count = today_stats["success_count"] or 0
     total_today = today_stats["total_requests"] or 0
@@ -332,7 +380,12 @@ async def dashboard(request: Request):
 async def list_upstreams(request: Request):
     """上游密钥列表（含调度器实时状态）"""
     await require_admin(request)
-    rows = fetch_all("SELECT * FROM upstream_keys ORDER BY created_at")
+    # 显式列名：排除 api_key_ciphertext（密文不出列表接口，明文仅走 /reveal 端点）
+    rows = await asyncio.to_thread(
+        fetch_all,
+        "SELECT id, name, provider, key_prefix, weight, rpm_limit, switch_threshold, "
+        "status, created_at, updated_at FROM upstream_keys ORDER BY created_at"
+    )
     scheduler = get_scheduler()
     all_buckets = scheduler.get_bucket_stats()
 
@@ -379,7 +432,7 @@ async def create_upstream(req: UpstreamCreateRequest, request: Request):
     """添加上游密钥"""
     await require_admin(request)
 
-    master_key = get_setting("upstream_master_key")
+    master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
     if not master_key:
         raise HTTPException(status_code=500, detail="主密钥未配置")
 
@@ -387,7 +440,8 @@ async def create_upstream(req: UpstreamCreateRequest, request: Request):
     key_id = str(uuid.uuid4())
     now = utcnow()
 
-    execute(
+    await asyncio.to_thread(
+        execute,
         "INSERT INTO upstream_keys "
         "(id, name, provider, api_key_ciphertext, key_prefix, weight, rpm_limit, switch_threshold, status, created_at, updated_at) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s)",
@@ -399,7 +453,7 @@ async def create_upstream(req: UpstreamCreateRequest, request: Request):
     scheduler = get_scheduler()
     scheduler.invalidate_key_cache(key_id)
 
-    insert_audit("create", "upstream_key", key_id, f"创建上游密钥: {req.name}")
+    await asyncio.to_thread(insert_audit, "create", "upstream_key", key_id, f"创建上游密钥: {req.name}")
     return {"id": key_id, "message": "创建成功"}
 
 
@@ -408,7 +462,7 @@ async def update_upstream(key_id: str, req: UpstreamUpdateRequest, request: Requ
     """编辑上游密钥"""
     await require_admin(request)
 
-    existing = fetch_one("SELECT * FROM upstream_keys WHERE id = %s", (key_id,))
+    existing = await asyncio.to_thread(fetch_one, "SELECT * FROM upstream_keys WHERE id = %s", (key_id,))
     if not existing:
         raise HTTPException(status_code=404, detail="密钥不存在")
 
@@ -424,12 +478,12 @@ async def update_upstream(key_id: str, req: UpstreamUpdateRequest, request: Requ
         updates.append("updated_at = %s")
         params.append(utcnow())
         params.append(key_id)
-        execute(f"UPDATE upstream_keys SET {', '.join(updates)} WHERE id = %s", tuple(params))
+        await asyncio.to_thread(execute, f"UPDATE upstream_keys SET {', '.join(updates)} WHERE id = %s", tuple(params))
 
     scheduler = get_scheduler()
     scheduler.invalidate_key_cache(key_id)
 
-    insert_audit("update", "upstream_key", key_id, f"更新上游密钥")
+    await asyncio.to_thread(insert_audit, "update", "upstream_key", key_id, f"更新上游密钥")
     return {"message": "更新成功"}
 
 
@@ -438,12 +492,12 @@ async def delete_upstream(key_id: str, request: Request):
     """删除上游密钥"""
     await require_admin(request)
 
-    execute("DELETE FROM upstream_keys WHERE id = %s", (key_id,))
+    await asyncio.to_thread(execute, "DELETE FROM upstream_keys WHERE id = %s", (key_id,))
 
     scheduler = get_scheduler()
     scheduler.invalidate_key_cache(key_id)
 
-    insert_audit("delete", "upstream_key", key_id, f"删除上游密钥")
+    await asyncio.to_thread(insert_audit, "delete", "upstream_key", key_id, f"删除上游密钥")
     return {"message": "删除成功"}
 
 
@@ -455,7 +509,7 @@ async def unfreeze_upstream(key_id: str, request: Request):
     scheduler = get_scheduler()
     count = scheduler.unfreeze_key_all_buckets(key_id)
 
-    insert_audit("unfreeze", "upstream_key", key_id, f"解冻{count}个桶")
+    await asyncio.to_thread(insert_audit, "unfreeze", "upstream_key", key_id, f"解冻{count}个桶")
     return {"message": f"已解冻{count}个桶", "count": count}
 
 
@@ -463,12 +517,13 @@ async def unfreeze_upstream(key_id: str, request: Request):
 async def reveal_upstream_key(key_id: str, request: Request):
     """解密并返回上游密钥明文（仅管理员可调用，会写入审计日志）"""
     await require_admin(request)
+    _require_platform_scope(request, SENSITIVE_SCOPES["reveal_upstream_key"])
 
-    row = fetch_one("SELECT name, api_key_ciphertext, key_prefix FROM upstream_keys WHERE id = %s", (key_id,))
+    row = await asyncio.to_thread(fetch_one, "SELECT name, api_key_ciphertext, key_prefix FROM upstream_keys WHERE id = %s", (key_id,))
     if not row:
         raise HTTPException(status_code=404, detail="密钥不存在")
 
-    master_key = get_setting("upstream_master_key")
+    master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
     if not master_key:
         raise HTTPException(status_code=500, detail="主密钥未配置")
 
@@ -477,7 +532,7 @@ async def reveal_upstream_key(key_id: str, request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"密钥解密失败: {e}")
 
-    insert_audit("reveal", "upstream_key", key_id, f"查看上游密钥明文: {row['name']}")
+    await asyncio.to_thread(insert_audit, "reveal", "upstream_key", key_id, f"查看上游密钥明文: {row['name']}")
     return {"key": plaintext, "prefix": row["key_prefix"], "name": row["name"]}
 
 
@@ -488,33 +543,34 @@ async def check_upstream_keys_health(request: Request):
     scheduler = get_scheduler()
     from app.database import fetch_all as db_fetch
 
-    rows = db_fetch("SELECT id, name, key_prefix, status FROM upstream_keys WHERE status = 'active'")
+    rows = await asyncio.to_thread(db_fetch, "SELECT id, name, key_prefix, status FROM upstream_keys WHERE status = 'active'")
     results = []
     import httpx
+
+    # 循环内重复读取的配置提取到循环外（原先每个密钥各查一次DB）
+    health_base_url = await asyncio.to_thread(get_setting, "upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+    _master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
 
     async with httpx.AsyncClient(timeout=8.0) as client:
         for row in rows:
             key_id = row["id"]
-            api_key = scheduler._ensure_key_cached(key_id, None)
+            api_key = await asyncio.to_thread(scheduler._ensure_key_cached, key_id, None)
             if not api_key:
                 # 尝试从数据库解密
-                key_row = db_fetch("SELECT api_key_ciphertext FROM upstream_keys WHERE id = %s", (key_id,))
-                if key_row:
+                key_row = await asyncio.to_thread(db_fetch, "SELECT api_key_ciphertext FROM upstream_keys WHERE id = %s", (key_id,))
+                if key_row and _master_key:
                     from app.security import decrypt_upstream_key
-                    from app.database import get_setting as gs
-                    master_key = gs("upstream_master_key")
-                    if master_key:
-                        try:
-                            api_key = decrypt_upstream_key(key_row[0]["api_key_ciphertext"], master_key)
-                        except Exception:
-                            pass
+                    try:
+                        api_key = decrypt_upstream_key(key_row[0]["api_key_ciphertext"], _master_key)
+                    except Exception:
+                        pass
             if not api_key:
                 results.append({"id": key_id, "name": row["name"], "status": "unknown", "error": "无法解密密钥"})
                 continue
 
             try:
                 resp = await client.get(
-                    "https://integrate.api.nvidia.com/v1/models",
+                    f"{health_base_url}/models",
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
                 if resp.status_code == 200:
@@ -545,7 +601,8 @@ async def check_upstream_keys_health(request: Request):
 async def list_clients(request: Request):
     """下游客户列表"""
     await require_admin(request)
-    rows = fetch_all(
+    rows = await asyncio.to_thread(
+        fetch_all,
         "SELECT c.*, "
         "(SELECT COUNT(*) FROM client_api_keys WHERE client_id = c.id) as key_count "
         "FROM clients c ORDER BY c.created_at DESC"
@@ -567,12 +624,13 @@ async def create_client(req: ClientCreateRequest, request: Request):
     client_id = str(uuid.uuid4())
     now = utcnow()
 
-    execute(
+    await asyncio.to_thread(
+        execute,
         "INSERT INTO clients (id, name, user_type, status, created_at, updated_at) VALUES (%s, %s, %s, 'active', %s, %s)",
         (client_id, req.name, (req.user_type or "old"), now, now),
     )
 
-    insert_audit("create", "client", client_id, f"创建客户: {req.name} (type={req.user_type or 'old'})")
+    await asyncio.to_thread(insert_audit, "create", "client", client_id, f"创建客户: {req.name} (type={req.user_type or 'old'})")
     return {"id": client_id, "message": "创建成功"}
 
 
@@ -580,7 +638,7 @@ async def create_client(req: ClientCreateRequest, request: Request):
 async def get_client(client_id: str, request: Request):
     """客户详情"""
     await require_admin(request)
-    row = fetch_one("SELECT * FROM clients WHERE id = %s", (client_id,))
+    row = await asyncio.to_thread(fetch_one, "SELECT * FROM clients WHERE id = %s", (client_id,))
     if not row:
         raise HTTPException(status_code=404, detail="客户不存在")
     return row
@@ -603,9 +661,9 @@ async def update_client(client_id: str, req: ClientUpdateRequest, request: Reque
         updates.append("updated_at = %s")
         params.append(utcnow())
         params.append(client_id)
-        execute(f"UPDATE clients SET {', '.join(updates)} WHERE id = %s", tuple(params))
+        await asyncio.to_thread(execute, f"UPDATE clients SET {', '.join(updates)} WHERE id = %s", tuple(params))
 
-    insert_audit("update", "client", client_id, f"更新客户")
+    await asyncio.to_thread(insert_audit, "update", "client", client_id, f"更新客户")
     return {"message": "更新成功"}
 
 
@@ -613,9 +671,15 @@ async def update_client(client_id: str, req: ClientUpdateRequest, request: Reque
 async def delete_client(client_id: str, request: Request):
     """删除客户"""
     await require_admin(request)
-    execute("DELETE FROM client_api_keys WHERE client_id = %s", (client_id,))
-    execute("DELETE FROM clients WHERE id = %s", (client_id,))
-    insert_audit("delete", "client", client_id, f"删除客户")
+    _require_platform_scope(request, SENSITIVE_SCOPES["delete_client"])
+
+    def _delete_client_sync():
+        # 小循环（2条DELETE+1条审计）整体包一次 to_thread，避免逐条调度
+        execute("DELETE FROM client_api_keys WHERE client_id = %s", (client_id,))
+        execute("DELETE FROM clients WHERE id = %s", (client_id,))
+        insert_audit("delete", "client", client_id, f"删除客户")
+
+    await asyncio.to_thread(_delete_client_sync)
     return {"message": "删除成功"}
 
 
@@ -623,14 +687,22 @@ async def delete_client(client_id: str, request: Request):
 async def list_client_keys(client_id: str, request: Request):
     """客户密钥列表"""
     await require_admin(request)
-    return fetch_all("SELECT * FROM client_api_keys WHERE client_id = %s ORDER BY created_at", (client_id,))
+    # 显式列名：排除 key_hash / key_ciphertext（密文与哈希不出列表接口，明文仅走 /reveal 端点）
+    return await asyncio.to_thread(
+        fetch_all,
+        "SELECT id, client_id, key_prefix, status, created_at, last_used_at "
+        "FROM client_api_keys WHERE client_id = %s ORDER BY created_at",
+        (client_id,),
+    )
 
 
 @router.get("/clients/{client_id}/keys/{key_id}/reveal", tags=["管理员"])
 async def reveal_client_key(client_id: str, key_id: str, request: Request):
     """解密并返回客户密钥明文（仅限平台同步使用）"""
     await require_admin(request)
-    key_row = fetch_one(
+    _require_platform_scope(request, SENSITIVE_SCOPES["reveal_client_key"])
+    key_row = await asyncio.to_thread(
+        fetch_one,
         "SELECT id, key_ciphertext, key_prefix, status FROM client_api_keys WHERE id=%s AND client_id=%s",
         (key_id, client_id),
     )
@@ -642,11 +714,11 @@ async def reveal_client_key(client_id: str, key_id: str, request: Request):
             "type": "decryption_error", "code": "missing_ciphertext",
         })
     try:
-        master_key = get_setting("upstream_master_key")
+        master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
         if not master_key:
             raise HTTPException(status_code=500, detail="主密钥未配置")
         plaintext = decrypt_secret(key_row["key_ciphertext"], master_key)
-        insert_audit("reveal", "client_key", key_id, f"查看客户密钥明文: {key_row['key_prefix']}")
+        await asyncio.to_thread(insert_audit, "reveal", "client_key", key_id, f"查看客户密钥明文: {key_row['key_prefix']}")
         return {"key": plaintext, "prefix": key_row["key_prefix"], "status": key_row["status"]}
     except HTTPException:
         raise
@@ -659,15 +731,15 @@ async def create_client_key(client_id: str, request: Request):
     """创建客户API密钥"""
     await require_admin(request)
 
-    client = fetch_one("SELECT * FROM clients WHERE id = %s", (client_id,))
+    client = await asyncio.to_thread(fetch_one, "SELECT * FROM clients WHERE id = %s", (client_id,))
     if not client:
         raise HTTPException(status_code=404, detail="客户不存在")
 
-    master_key = get_setting("upstream_master_key")
+    master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
     if not master_key:
         raise HTTPException(status_code=500, detail="主密钥未配置")
 
-    # 生成平台API密钥
+    # 生成平台API密钥（hash_secret 为 SHA-256，微秒级，无需 to_thread）
     api_key = generate_platform_key()
     key_hash = hash_secret(api_key)
     ciphertext = encrypt_secret(api_key, master_key)
@@ -677,14 +749,15 @@ async def create_client_key(client_id: str, request: Request):
     # 强制命名规范：客户平台ID+平台ID号
     key_name = f"{client['id'][:8]}+{key_id[:8]}"
 
-    execute(
+    await asyncio.to_thread(
+        execute,
         "INSERT INTO client_api_keys "
         "(id, client_id, key_hash, key_prefix, key_ciphertext, status, created_at, last_used_at) "
         "VALUES (%s, %s, %s, %s, %s, 'active', %s, NULL)",
         (key_id, client_id, key_hash, mask_secret(api_key), ciphertext, now),
     )
 
-    insert_audit("create", "client_key", key_id, f"创建客户密钥: {key_name} (client={client['name']})")
+    await asyncio.to_thread(insert_audit, "create", "client_key", key_id, f"创建客户密钥: {key_name} (client={client['name']})")
 
     # 返回完整密钥（仅此一次显示）
     return {
@@ -700,8 +773,10 @@ async def create_client_key(client_id: str, request: Request):
 async def delete_client_key(client_id: str, key_id: str, request: Request):
     """删除客户密钥"""
     await require_admin(request)
-    execute("DELETE FROM client_api_keys WHERE id = %s AND client_id = %s", (key_id, client_id))
-    insert_audit("delete", "client_key", key_id, f"删除客户密钥")
+    await asyncio.to_thread(execute, "DELETE FROM client_api_keys WHERE id = %s AND client_id = %s", (key_id, client_id))
+    # 立即失效该密钥的调度器认证缓存，避免已删密钥在TTL窗口内仍可通过认证
+    get_scheduler().invalidate_client_key_cache()
+    await asyncio.to_thread(insert_audit, "delete", "client_key", key_id, f"删除客户密钥")
     return {"message": "删除成功"}
 
 
@@ -713,19 +788,23 @@ async def update_client_key(client_id: str, key_id: str, request: Request):
     new_status = body.get("status", "")
     if new_status not in ("active", "revoked"):
         raise HTTPException(status_code=400, detail="状态只能是 active 或 revoked")
-    key_row = fetch_one(
+    key_row = await asyncio.to_thread(
+        fetch_one,
         "SELECT id, status FROM client_api_keys WHERE id=%s AND client_id=%s",
         (key_id, client_id),
     )
     if not key_row:
         raise HTTPException(status_code=404, detail="密钥不存在")
-    execute(
+    await asyncio.to_thread(
+        execute,
         "UPDATE client_api_keys SET status = %s WHERE id = %s AND client_id = %s",
         (new_status, key_id, client_id),
     )
     from app.scheduler import get_scheduler
     get_scheduler().invalidate_active_keys_cache()
-    insert_audit("update", "client_key", key_id, f"密钥状态改为 {new_status}")
+    # 立即失效认证缓存，避免被禁用密钥在TTL窗口内仍可通过认证
+    get_scheduler().invalidate_client_key_cache()
+    await asyncio.to_thread(insert_audit, "update", "client_key", key_id, f"密钥状态改为 {new_status}")
     return {"message": f"密钥状态已更新为 {new_status}", "status": new_status}
 
 
@@ -734,7 +813,8 @@ async def client_usage(client_id: str, request: Request):
     """客户用量统计"""
     await require_admin(request)
     today = utcnow()[:10]
-    stats = fetch_one(
+    stats = await asyncio.to_thread(
+        fetch_one,
         "SELECT COUNT(*) as total, "
         "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success, "
         "SUM(total_tokens) as tokens "
@@ -771,7 +851,7 @@ async def unfreeze_bucket(key_id: str, model: str, request: Request):
     await require_admin(request)
     scheduler = get_scheduler()
     scheduler.unfreeze_bucket(key_id, model)
-    insert_audit("unfreeze", "bucket", f"{key_id}:{model}", f"解冻桶")
+    await asyncio.to_thread(insert_audit, "unfreeze", "bucket", f"{key_id}:{model}", f"解冻桶")
     return {"message": "桶已解冻"}
 
 
@@ -861,7 +941,7 @@ async def algorithm_detail(num: int, request: Request):
     if num < 1 or num > 17:
         raise HTTPException(status_code=400, detail={"message": "算法编号必须在1-17之间", "type": "validation_error", "code": "invalid_algorithm_num"})
     scheduler = get_scheduler()
-    return scheduler.get_algorithm_detail(num)
+    return await asyncio.to_thread(scheduler.get_algorithm_detail, num)
 
 
 # ========== 请求日志 ==========
@@ -900,15 +980,16 @@ async def request_logs(
     if client_id:
         where.append("client_id = %s")
         params.append(client_id)
+    # LIKE 搜索参数统一转义 % 与 _（防通配符注入），并在 SQL 中声明 ESCAPE '\'
     if model:
-        where.append("model LIKE %s")
-        params.append(f"%{model}%")
+        where.append("model LIKE %s ESCAPE '\\'")
+        params.append(f"%{_like_escape(model)}%")
     if status_code:
         where.append("status_code = %s")
         params.append(status_code)
     if request_path:
-        where.append("request_path LIKE %s")
-        params.append(f"%{request_path}%")
+        where.append("request_path LIKE %s ESCAPE '\\'")
+        params.append(f"%{_like_escape(request_path)}%")
     if http_method:
         where.append("http_method = %s")
         params.append(http_method)
@@ -919,8 +1000,8 @@ async def request_logs(
         where.append("log_category = %s")
         params.append(log_category)
     if error_type:
-        where.append("error_type LIKE %s")
-        params.append(f"%{error_type}%")
+        where.append("error_type LIKE %s ESCAPE '\\'")
+        params.append(f"%{_like_escape(error_type)}%")
     if business_code:
         where.append("business_code = %s")
         params.append(business_code)
@@ -931,8 +1012,9 @@ async def request_logs(
         where.append("created_at <= %s")
         params.append(end_time)
     if search:
-        where.append("(error_msg LIKE %s OR error_detail LIKE %s OR request_body LIKE %s)")
-        params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+        where.append("(error_msg LIKE %s ESCAPE '\\' OR error_detail LIKE %s ESCAPE '\\' OR request_body LIKE %s ESCAPE '\\')")
+        _esc = f"%{_like_escape(search)}%"
+        params.extend([_esc, _esc, _esc])
 
     where_clause = " WHERE " + " AND ".join(where) if where else ""
 
@@ -954,8 +1036,9 @@ async def request_logs(
 
     offset = (page - 1) * page_size
 
-    total = fetch_one(f"SELECT COUNT(*) as cnt FROM request_logs{where_clause}", tuple(params))["cnt"]
-    rows = fetch_all(
+    total = (await asyncio.to_thread(fetch_one, f"SELECT COUNT(*) as cnt FROM request_logs{where_clause}", tuple(params)))["cnt"]
+    rows = await asyncio.to_thread(
+        fetch_all,
         f"SELECT r.*, COALESCE(c.name, '') as client_name FROM request_logs r LEFT JOIN clients c ON r.client_id = c.id{where_clause}{order_clause} LIMIT %s OFFSET %s",
         tuple(params) + (page_size, offset),
     )
@@ -975,7 +1058,8 @@ async def request_logs(
 async def request_log_detail(log_id: str, request: Request):
     """单条请求日志详情"""
     await require_admin(request)
-    row = fetch_one(
+    row = await asyncio.to_thread(
+        fetch_one,
         "SELECT r.*, COALESCE(c.name, '') as client_name FROM request_logs r LEFT JOIN clients c ON r.client_id = c.id WHERE r.id = %s",
         (log_id,),
     )
@@ -990,25 +1074,25 @@ async def request_logs_stats_summary(request: Request):
     await require_admin(request)
 
     # 总数统计
-    total = fetch_one("SELECT COUNT(*) as cnt FROM request_logs")["cnt"]
+    total = await asyncio.to_thread(fetch_one, "SELECT COUNT(*) as cnt FROM request_logs")["cnt"]
 
     # 按日志分类统计
-    category_stats = fetch_all(
+    category_stats = await asyncio.to_thread(fetch_all, 
         "SELECT log_category, COUNT(*) as cnt FROM request_logs GROUP BY log_category"
     )
 
     # 按状态码统计
-    status_stats = fetch_all(
+    status_stats = await asyncio.to_thread(fetch_all, 
         "SELECT status_code, COUNT(*) as cnt FROM request_logs GROUP BY status_code ORDER BY cnt DESC"
     )
 
     # 按HTTP方法统计
-    method_stats = fetch_all(
+    method_stats = await asyncio.to_thread(fetch_all, 
         "SELECT http_method, COUNT(*) as cnt FROM request_logs WHERE http_method != '' GROUP BY http_method"
     )
 
     # 最近24小时请求量趋势（按小时分组）
-    hourly_stats = fetch_all(
+    hourly_stats = await asyncio.to_thread(fetch_all, 
         """SELECT substr(created_at, 12, 2) as hour, COUNT(*) as cnt
            FROM request_logs
            WHERE created_at::timestamptz >= NOW() - INTERVAL '24 hours'
@@ -1016,13 +1100,13 @@ async def request_logs_stats_summary(request: Request):
     )
 
     # Top 10 请求路径
-    top_paths = fetch_all(
+    top_paths = await asyncio.to_thread(fetch_all, 
         """SELECT request_path, COUNT(*) as cnt FROM request_logs
            WHERE request_path != '' GROUP BY request_path ORDER BY cnt DESC LIMIT 10"""
     )
 
     # Top 10 客户端（含client_name）
-    top_clients = fetch_all(
+    top_clients = await asyncio.to_thread(fetch_all, 
         """SELECT COALESCE(MAX(c.name), r.client_id) as client_display, COUNT(*) as cnt,
                   SUM(r.total_tokens) as total_tokens, AVG(r.latency_ms) as avg_latency
            FROM request_logs r
@@ -1032,13 +1116,13 @@ async def request_logs_stats_summary(request: Request):
     )
 
     # Top 10 客户端IP
-    top_ips = fetch_all(
+    top_ips = await asyncio.to_thread(fetch_all, 
         """SELECT client_ip, COUNT(*) as cnt FROM request_logs
            WHERE client_ip != '' GROUP BY client_ip ORDER BY cnt DESC LIMIT 10"""
     )
 
     # 按日期统计（最近7天每日请求量）
-    daily_stats = fetch_all(
+    daily_stats = await asyncio.to_thread(fetch_all, 
         """SELECT (created_at::timestamptz AT TIME ZONE 'Asia/Shanghai')::date as date,
                   COUNT(*) as cnt,
                   SUM(CASE WHEN status_code=200 THEN 1 ELSE 0 END) as success_cnt,
@@ -1052,7 +1136,7 @@ async def request_logs_stats_summary(request: Request):
     )
 
     # 按客户端ID统计（最近7天并发分布）
-    concurrency_stats = fetch_all(
+    concurrency_stats = await asyncio.to_thread(fetch_all, 
         """SELECT client_id, COUNT(*) as cnt,
                   AVG(latency_ms)::int as avg_latency,
                   SUM(total_tokens) as total_tokens,
@@ -1063,7 +1147,7 @@ async def request_logs_stats_summary(request: Request):
     )
 
     # Top 10 错误类型（含错误详情） - 修复：GROUP_CONCAT -> PostgreSQL string_agg
-    top_errors = fetch_all(
+    top_errors = await asyncio.to_thread(fetch_all, 
         """SELECT error_type, business_code, COUNT(*) as cnt,
                   string_agg(DISTINCT error_detail, ', ') as details
            FROM request_logs
@@ -1072,7 +1156,7 @@ async def request_logs_stats_summary(request: Request):
     )
 
     # Top 10 模型（含token统计）
-    top_models = fetch_all(
+    top_models = await asyncio.to_thread(fetch_all, 
         """SELECT model, COUNT(*) as cnt,
                   SUM(total_tokens) as total_tokens,
                   AVG(latency_ms) as avg_latency
@@ -1082,7 +1166,7 @@ async def request_logs_stats_summary(request: Request):
     )
 
     # 延迟统计
-    latency_stats = fetch_one(
+    latency_stats = await asyncio.to_thread(fetch_one, 
         """SELECT AVG(latency_ms) as avg_latency,
                   MAX(latency_ms) as max_latency,
                   SUM(CASE WHEN status_code=200 THEN 1 ELSE 0 END) as success_count,
@@ -1097,13 +1181,13 @@ async def request_logs_stats_summary(request: Request):
     )
 
     # P95延迟（PostgreSQL 兼容：使用 percentile_cont）
-    p95_row = fetch_one(
+    p95_row = await asyncio.to_thread(fetch_one, 
         """SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) as p95_latency
            FROM request_logs WHERE latency_ms > 0"""
     )
 
     # 最近10条错误日志（实时追踪）
-    recent_errors = fetch_all(
+    recent_errors = await asyncio.to_thread(fetch_all, 
         """SELECT r.id, r.status_code, r.error_type, r.business_code, r.error_msg,
                   r.error_detail, r.model, r.request_path,
                   COALESCE(c.name, r.client_id) as client_display,
@@ -1154,8 +1238,9 @@ async def cleanup_request_logs(
     """清理历史请求日志 """
     await require_admin(request)
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
-    result = execute("DELETE FROM request_logs WHERE created_at < %s", (cutoff,))
+    # 时间戳统一走 database.py 的 utcnow/days_ago_utc 家族（Z格式），消除第三种时间格式变体
+    cutoff = days_ago_utc(days)
+    result = await asyncio.to_thread(execute, "DELETE FROM request_logs WHERE created_at < %s", (cutoff,))
     return {"message": f"已清理 {cutoff} 之前的日志", "cutoff": cutoff}
 
 
@@ -1170,11 +1255,16 @@ async def audit_logs(
     """审计日志"""
     await require_admin(request)
     offset = (page - 1) * page_size
-    total = fetch_one("SELECT COUNT(*) as cnt FROM audit_logs")["cnt"]
-    rows = fetch_all(
-        "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT %s OFFSET %s",
-        (page_size, offset),
-    )
+
+    def _audit_logs_sync():
+        total = fetch_one("SELECT COUNT(*) as cnt FROM audit_logs")["cnt"]
+        rows = fetch_all(
+            "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            (page_size, offset),
+        )
+        return total, rows
+
+    total, rows = await asyncio.to_thread(_audit_logs_sync)
     return {"total": total, "page": page, "page_size": page_size, "data": rows}
 
 
@@ -1188,9 +1278,8 @@ async def get_settings(request: Request):
         "upstream_base_url", "chat_path", "models_path",
         "cooldown_seconds", "switch_threshold", "maintenance_mode",
     ]
-    result = {}
-    for key in keys:
-        result[key] = get_setting(key)
+    # 小循环（6个key）整体包一次 to_thread，避免逐条调度
+    result = await asyncio.to_thread(lambda: {key: get_setting(key) for key in keys})
     return result
 
 
@@ -1198,14 +1287,22 @@ async def get_settings(request: Request):
 async def save_settings(req: PolicyUpdateRequest, request: Request):
     """保存网关策略"""
     await require_admin(request)
+    _require_platform_scope(request, SENSITIVE_SCOPES["save_settings"])
 
     fields = ["upstream_base_url", "chat_path", "models_path", "cooldown_seconds", "switch_threshold"]
-    for field in fields:
-        val = getattr(req, field, None)
-        if val is not None:
-            set_setting(field, str(val))
 
-    insert_audit("update", "settings", "", "更新网关策略")
+    def _save_settings_sync():
+        # 小循环（≤5条写入）整体包一次 to_thread
+        for field in fields:
+            val = getattr(req, field, None)
+            if val is not None:
+                set_setting(field, str(val))
+
+    await asyncio.to_thread(_save_settings_sync)
+
+    # 更新后清空 public_api 的设置读取缓存，保证配置立即生效
+    _clear_settings_cache()
+    await asyncio.to_thread(insert_audit, "update", "settings", "", "更新网关策略")
     return {"message": "保存成功"}
 
 
@@ -1215,7 +1312,7 @@ async def save_settings(req: PolicyUpdateRequest, request: Request):
 async def list_tokens(request: Request):
     """平台令牌列表"""
     await require_admin(request)
-    rows = fetch_all("SELECT * FROM platform_tokens ORDER BY created_at DESC")
+    rows = await asyncio.to_thread(fetch_all, "SELECT * FROM platform_tokens ORDER BY created_at DESC")
     result = []
     for row in rows:
         r = dict(row)
@@ -1240,14 +1337,18 @@ async def create_token(req: PlatformTokenCreateRequest, request: Request):
     # 强制设置过期时间，不允许NULL（永不过期）
     expires_at = req.expires_at or (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    execute(
+    # 未显式指定scopes时使用最小默认集（见 DEFAULT_PLATFORM_SCOPES 注释）
+    scopes = req.scopes if req.scopes is not None else DEFAULT_PLATFORM_SCOPES
+
+    await asyncio.to_thread(
+        execute,
         "INSERT INTO platform_tokens "
         "(id, name, token_hash, scopes, status, created_at, last_used_at, expires_at) "
         "VALUES (%s, %s, %s, %s, 'active', %s, NULL, %s)",
-        (token_id, req.name, token_hash, json.dumps(req.scopes), now, expires_at),
+        (token_id, req.name, token_hash, json.dumps(scopes), now, expires_at),
     )
 
-    insert_audit("create", "platform_token", token_id, f"创建平台令牌: {req.name}")
+    await asyncio.to_thread(insert_audit, "create", "platform_token", token_id, f"创建平台令牌: {req.name}")
     return {"id": token_id, "token": token, "message": "令牌已创建，请妥善保存（有效期至" + expires_at + "）"}
 
 
@@ -1255,8 +1356,12 @@ async def create_token(req: PlatformTokenCreateRequest, request: Request):
 async def delete_token(token_id: str, request: Request):
     """删除平台令牌"""
     await require_admin(request)
-    execute("DELETE FROM platform_tokens WHERE id = %s", (token_id,))
-    insert_audit("delete", "platform_token", token_id, f"删除平台令牌")
+
+    def _delete_token_sync():
+        execute("DELETE FROM platform_tokens WHERE id = %s", (token_id,))
+        insert_audit("delete", "platform_token", token_id, f"删除平台令牌")
+
+    await asyncio.to_thread(_delete_token_sync)
     return {"message": "删除成功"}
 
 
@@ -1271,8 +1376,11 @@ async def toggle_maintenance(request: Request):
     # 热更新：先切换调度器，再切换维护标志
     set_maintenance_mode(not current)
 
-    set_setting("maintenance_mode", "true" if not current else "false")
-    insert_audit("maintenance", "system", "", f"维护模式: {'开启' if not current else '关闭'}")
+    def _maintenance_sync():
+        set_setting("maintenance_mode", "true" if not current else "false")
+        insert_audit("maintenance", "system", "", f"维护模式: {'开启' if not current else '关闭'}")
+
+    await asyncio.to_thread(_maintenance_sync)
     return {"maintenance_mode": not current, "message": f"维护模式已{'开启' if not current else '关闭'}"}
 
 
@@ -1281,10 +1389,11 @@ async def global_status(request: Request):
     """全局状态总览"""
     await require_admin(request)
     scheduler = get_scheduler()
-    status = scheduler.get_global_status()
+    # get_global_status 内部含DB查询（活跃密钥数），与两条COUNT一起经线程池执行
+    status = await asyncio.to_thread(scheduler.get_global_status)
     status["maintenance_mode"] = is_maintenance_mode()
-    status["upstream_keys"] = fetch_one("SELECT COUNT(*) as cnt FROM upstream_keys WHERE status='active'")["cnt"]
-    status["clients"] = fetch_one("SELECT COUNT(*) as cnt FROM clients WHERE status='active'")["cnt"]
+    status["upstream_keys"] = (await asyncio.to_thread(fetch_one, "SELECT COUNT(*) as cnt FROM upstream_keys WHERE status='active'"))["cnt"]
+    status["clients"] = (await asyncio.to_thread(fetch_one, "SELECT COUNT(*) as cnt FROM clients WHERE status='active'"))["cnt"]
     # v10.0: 熔断器状态
     try:
         from app.circuit_breaker import get_circuit_breaker
@@ -1341,19 +1450,23 @@ async def validate_models(request: Request):
     upstream_ids = set()
     upstream_models = {}
     try:
-        active_keys = fetch_all(
+        active_keys = await asyncio.to_thread(
+            fetch_all,
             "SELECT id, api_key_ciphertext FROM upstream_keys WHERE status = 'active' LIMIT 1"
         )
         if active_keys:
-            master_key = get_setting("upstream_master_key")
+            master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
             if master_key:
                 api_key = decrypt_upstream_key(active_keys[0]["api_key_ciphertext"], master_key)
                 import httpx
-                resp = httpx.get(
-                    "https://integrate.api.nvidia.com/v1/models",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=15.0,
-                )
+                # 修复：原为同步 httpx.get，会阻塞事件循环；端点本身是async，改用AsyncClient+await
+                # 上游地址从网关配置读取（默认NVIDIA NIM）
+                _base_url = await asyncio.to_thread(get_setting, "upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(
+                        f"{_base_url}/models",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                    )
                 if resp.status_code == 200:
                     data = resp.json()
                     for m in data.get("data", []):
@@ -1395,7 +1508,7 @@ async def commercial_detection(request: Request):
     """商用行为识别列表"""
     await require_admin(request)
     detector = get_detector()
-    return detector.get_all_detections()
+    return await asyncio.to_thread(detector.get_all_detections)
 
 
 @router.put("/commercial-detection/{client_id}", tags=["管理员"])
@@ -1407,10 +1520,10 @@ async def update_detection(client_id: str, request: Request):
     false_positive = body.get("false_positive", False)
 
     detector = get_detector()
-    detector.update_detection(client_id, admin_confirmed, false_positive)
+    await asyncio.to_thread(detector.update_detection, client_id, admin_confirmed, false_positive)
 
-    insert_audit("update", "commercial_detection", client_id,
-                 f"商用标记: confirmed={admin_confirmed}, false_positive={false_positive}")
+    await asyncio.to_thread(insert_audit, "update", "commercial_detection", client_id,
+                            f"商用标记: confirmed={admin_confirmed}, false_positive={false_positive}")
     return {"message": "更新成功"}
 
 
@@ -1422,7 +1535,8 @@ async def block_commercial_client(client_id: str, request: Request):
     reason = body.get("reason", "商用行为封禁")
 
     detector = get_detector()
-    detector.block_client(client_id, reason)
+    # block_client 内部多条同步DB写入（禁用客户/吊销密钥/更新检测记录/审计），整体经线程池执行
+    await asyncio.to_thread(detector.block_client, client_id, reason)
     return {"message": "客户端已封禁", "client_id": client_id}
 
 
@@ -1432,7 +1546,7 @@ async def unblock_commercial_client(client_id: str, request: Request):
     await require_admin(request)
 
     detector = get_detector()
-    detector.unblock_client(client_id)
+    await asyncio.to_thread(detector.unblock_client, client_id)
     return {"message": "客户端已解封", "client_id": client_id}
 
 
@@ -1448,18 +1562,18 @@ async def debug_test(req: DebugChatRequest, request: Request):
     await require_admin(request)
 
     import httpx
-    base_url = get_setting("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
-    chat_path = get_setting("chat_path") or "/chat/completions"
+    base_url = await asyncio.to_thread(get_setting, "upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+    chat_path = await asyncio.to_thread(get_setting, "chat_path") or "/chat/completions"
     url = f"{base_url}{chat_path}"
 
     # 处理 api_key：如果是 key_id 标记则自动解密
     api_key = req.api_key
     if api_key.startswith("__use_key_id__:"):
         key_id = api_key.split(":", 1)[1]
-        row = fetch_one("SELECT api_key_ciphertext FROM upstream_keys WHERE id = %s", (key_id,))
+        row = await asyncio.to_thread(fetch_one, "SELECT api_key_ciphertext FROM upstream_keys WHERE id = %s", (key_id,))
         if not row:
             return {"status_code": 0, "error": "指定的密钥不存在"}
-        master_key = get_setting("upstream_master_key")
+        master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
         if not master_key:
             return {"status_code": 0, "error": "主密钥未配置"}
         try:
@@ -1499,7 +1613,8 @@ async def realtime_traffic(request: Request):
     now = time.time()
     # 最近5分钟每分钟请求数
     five_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    traffic = fetch_all(
+    traffic = await asyncio.to_thread(
+        fetch_all,
         "SELECT date_trunc('minute', created_at::timestamptz) as minute, "
         "COUNT(*) as requests, "
         "SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END) as success "
@@ -1510,7 +1625,7 @@ async def realtime_traffic(request: Request):
     scheduler = get_scheduler()
     return {
         "traffic": traffic,
-        "scheduler": scheduler.get_global_status(),
+        "scheduler": await asyncio.to_thread(scheduler.get_global_status),
     }
 
 
@@ -1520,7 +1635,8 @@ async def realtime_traffic(request: Request):
 async def get_commercial_settings(request: Request):
     """获取商用检测设置"""
     await require_admin(request)
-    from app.commercial_detect import detector
+    # 修复：原 from app.commercial_detect import detector 模块内不存在该名，ImportError必500
+    detector = get_detector()
     return {
         "detection_enabled": detector.detection_enabled,
         "confidence_threshold": detector.confidence_threshold,
@@ -1532,39 +1648,43 @@ async def get_commercial_settings(request: Request):
 async def toggle_commercial_detection(request: Request, enabled: bool = True):
     """开关商用检测"""
     await require_admin(request)
-    from app.commercial_detect import detector
+    # 修复：原局部导入 detector 不存在（模块级单例获取函数为 get_detector），ImportError必500
+    detector = get_detector()
     if enabled:
         detector.enable_detection()
     else:
         detector.disable_detection()
-    insert_audit("update", "commercial_detection", "toggle", f"商用检测已{'启用' if enabled else '禁用'}")
+    await asyncio.to_thread(insert_audit, "update", "commercial_detection", "toggle", f"商用检测已{'启用' if enabled else '禁用'}")
     return {"message": f"商用检测已{'启用' if enabled else '禁用'}"}
 
 @router.post("/commercial/threshold", tags=["管理员"])
 async def set_commercial_threshold(request: Request, threshold: int = 70):
     """设置商用检测置信度阈值"""
     await require_admin(request)
-    from app.commercial_detect import detector
+    # 修复：原局部导入 detector 不存在，ImportError必500
+    detector = get_detector()
     detector.set_confidence_threshold(max(0, min(100, threshold)))
-    insert_audit("update", "commercial_detection", "threshold", f"阈值设为{detector.confidence_threshold}")
+    await asyncio.to_thread(insert_audit, "update", "commercial_detection", "threshold", f"阈值设为{detector.confidence_threshold}")
     return {"threshold": detector.confidence_threshold}
 
 @router.post("/commercial/whitelist/{client_id}", tags=["管理员"])
 async def add_commercial_whitelist(client_id: str, request: Request):
     """添加商用检测白名单"""
     await require_admin(request)
-    from app.commercial_detect import detector
+    # 修复：原局部导入 detector 不存在，ImportError必500
+    detector = get_detector()
     detector.add_to_whitelist(client_id)
-    insert_audit("update", "commercial_detection", "whitelist_add", f"白名单添加: {client_id}")
+    await asyncio.to_thread(insert_audit, "update", "commercial_detection", "whitelist_add", f"白名单添加: {client_id}")
     return {"message": f"已添加白名单: {client_id}"}
 
 @router.delete("/commercial/whitelist/{client_id}", tags=["管理员"])
 async def remove_commercial_whitelist(client_id: str, request: Request):
     """移除商用检测白名单"""
     await require_admin(request)
-    from app.commercial_detect import detector
+    # 修复：原局部导入 detector 不存在，ImportError必500
+    detector = get_detector()
     detector.remove_from_whitelist(client_id)
-    insert_audit("update", "commercial_detection", "whitelist_remove", f"白名单移除: {client_id}")
+    await asyncio.to_thread(insert_audit, "update", "commercial_detection", "whitelist_remove", f"白名单移除: {client_id}")
     return {"message": f"已移除白名单: {client_id}"}
 
 
@@ -1613,19 +1733,20 @@ async def get_nim_models(request: Request, publisher: str = None, family: str = 
 async def get_algorithms_realtime(request: Request):
     """获取所有算法的实时状态(用于可视化面板)"""
     await require_admin(request)
-    from app.scheduler import surge_scheduler
-    stats = surge_scheduler.get_algorithm_stats()
-    buckets = surge_scheduler.get_bucket_stats()
+    # 修复：原 from app.scheduler import surge_scheduler 模块内不存在该名（单例获取函数为get_scheduler），ImportError必500
+    scheduler = get_scheduler()
+    stats = scheduler.get_algorithm_stats()
+    buckets = scheduler.get_bucket_stats()
 
-    # Per-algorithm breakdown for visualization
+    # Per-algorithm breakdown for visualization（get_algorithm_detail 内部可能查DB，经线程池执行）
     algorithm_visualization = {}
     for algo_id in range(1, 17):
-        detail = surge_scheduler.get_algorithm_detail(algo_id)
+        detail = await asyncio.to_thread(scheduler.get_algorithm_detail, algo_id)
         algorithm_visualization[f"algorithm_{algo_id}"] = detail
 
     return {
         "timestamp": time.time(),
-        "global_status": surge_scheduler.get_global_status(),
+        "global_status": await asyncio.to_thread(scheduler.get_global_status),
         "algorithm_stats": stats,
         "algorithm_details": algorithm_visualization,
         "bucket_count": len(buckets),
@@ -1674,8 +1795,8 @@ async def get_dashboard_comparison(
         )
         return row
 
-    period_a = query_period(period_a_start, period_a_end)
-    period_b = query_period(period_b_start, period_b_end)
+    period_a = await asyncio.to_thread(query_period, period_a_start, period_a_end)
+    period_b = await asyncio.to_thread(query_period, period_b_start, period_b_end)
 
     def to_dict(row, label):
         if not row:
@@ -1730,8 +1851,8 @@ async def get_error_code_definitions(request: Request):
 async def cleanup_logs(request: Request, keep_days: int = Query(3), keep_error_days: int = Query(90)):
     """清理请求日志：成功日志短期保留，错误日志长期保存"""
     await require_admin(request)
-    result = cleanup_success_logs(keep_days=keep_days, keep_error_days=keep_error_days)
-    insert_audit("cleanup", "request_logs", "", f"日志清理: 删除{result['success_deleted']}条成功日志(>{keep_days}天), {result['error_deleted']}条错误日志(>{keep_error_days}天)")
+    result = await asyncio.to_thread(cleanup_success_logs, keep_days=keep_days, keep_error_days=keep_error_days)
+    await asyncio.to_thread(insert_audit, "cleanup", "request_logs", "", f"日志清理: 删除{result['success_deleted']}条成功日志(>{keep_days}天), {result['error_deleted']}条错误日志(>{keep_error_days}天)")
     return {"message": "清理完成", **result}
 
 
@@ -1766,7 +1887,7 @@ async def get_latency_distribution(request: Request, model: str = Query(None)):
         LIMIT 20
     """
     try:
-        rows = fetch_all(query, params)
+        rows = await asyncio.to_thread(fetch_all, query, params)
         return {
             "data": [dict(r) for r in rows] if rows else [],
             "total_models": len(rows) if rows else 0,
@@ -1784,7 +1905,7 @@ async def get_error_analysis(request: Request, period: str = Query("day", patter
     hour_format = '%Y-%m-%dT%H:00:00'
     
     # 按状态码分类统计
-    rows = fetch_all(f"""
+    rows = await asyncio.to_thread(fetch_all, f"""
         SELECT 
             CASE 
                 WHEN status_code = 429 THEN '429限流'
@@ -1806,7 +1927,7 @@ async def get_error_analysis(request: Request, period: str = Query("day", patter
     """, (cutoff,))
     
     # 时间趋势（按小时）
-    trend_rows = fetch_all(f"""
+    trend_rows = await asyncio.to_thread(fetch_all, f"""
         SELECT 
             to_char(created_at::timestamptz, %s) as time_bucket,
             SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END) as count_429,
@@ -1845,7 +1966,7 @@ async def get_request_trend(request: Request, period: str = Query("day", pattern
     d = days_map.get(period, 1)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=d)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     
-    rows = fetch_all(f"""
+    rows = await asyncio.to_thread(fetch_all, f"""
         SELECT 
             to_char(created_at::timestamptz, %s) as time_bucket,
             COUNT(*) as total_requests,
@@ -1888,7 +2009,8 @@ async def get_models_status(request: Request):
     # 2. 从request_logs获取统计
     model_log_stats = {}
     try:
-        rows = fetch_all(
+        rows = await asyncio.to_thread(
+            fetch_all,
             "SELECT model, COUNT(*) as total_requests, "
             "SUM(CASE WHEN status_code BETWEEN 200 AND 299 THEN 1 ELSE 0 END) as success_count, "
             "SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END) as count_429, "
@@ -1909,7 +2031,8 @@ async def get_models_status(request: Request):
     # 今日统计
     today_model_stats = {}
     try:
-        today_rows = fetch_all(
+        today_rows = await asyncio.to_thread(
+            fetch_all,
             "SELECT model, COUNT(*) as today_requests, "
             "COALESCE(SUM(total_tokens), 0) as today_tokens "
             "FROM request_logs WHERE created_at >= %s AND model != '' AND model IS NOT NULL "
@@ -2055,12 +2178,12 @@ async def system_ip_monitor(request: Request):
     await require_admin(request)
     from app.ip_monitor import get_ip_monitor
     ip_monitor = get_ip_monitor()
-    stats = ip_monitor.get_stats()
-    stats["anomalies"] = ip_monitor.get_anomalies(min_score=30)
+    stats = await asyncio.to_thread(ip_monitor.get_stats)
+    stats["anomalies"] = await asyncio.to_thread(ip_monitor.get_anomalies, 30)
 
     # 补充 request_logs 实时数据
     try:
-        total_unique_ips = fetch_one("SELECT COUNT(DISTINCT client_ip) as cnt FROM request_logs WHERE client_ip != ''")
+        total_unique_ips = await asyncio.to_thread(fetch_one, "SELECT COUNT(DISTINCT client_ip) as cnt FROM request_logs WHERE client_ip != ''")
         if total_unique_ips:
             stats["total_unique_ips_from_logs"] = total_unique_ips["cnt"]
     except Exception:
@@ -2074,7 +2197,7 @@ async def system_ip_blocked(request: Request):
     """被封禁 IP 列表"""
     await require_admin(request)
     from app.ip_monitor import get_ip_monitor
-    return {"blocked": get_ip_monitor().get_blocked_ips()}
+    return {"blocked": await asyncio.to_thread(get_ip_monitor().get_blocked_ips)}
 
 
 @router.get("/system/ip-monitor/anomalies", tags=["v10.0系统"])
@@ -2082,7 +2205,7 @@ async def system_ip_anomalies(request: Request, min_score: int = 30):
     """异常 IP 列表"""
     await require_admin(request)
     from app.ip_monitor import get_ip_monitor
-    return {"anomalies": get_ip_monitor().get_anomalies(min_score=min_score)}
+    return {"anomalies": await asyncio.to_thread(get_ip_monitor().get_anomalies, min_score)}
 
 
 @router.post("/system/ip-monitor/unblock", tags=["v10.0系统"])
@@ -2094,7 +2217,7 @@ async def system_ip_unblock(request: Request):
     if not ip:
         raise HTTPException(status_code=400, detail={"message": "缺少ip参数", "type": "validation_error", "code": "missing_ip"})
     from app.ip_monitor import get_ip_monitor
-    get_ip_monitor().unblock_ip(ip)
+    await asyncio.to_thread(get_ip_monitor().unblock_ip, ip)
     return {"message": f"IP {ip} 已解封"}
 
 
@@ -2145,11 +2268,11 @@ async def sync_upstream_models(request: Request):
     from app.security import decrypt_upstream_key
     import httpx
 
-    master_key = get_setting("upstream_master_key")
+    master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
     if not master_key:
         return {"error": "未配置上游主密钥", "count": 0, "models": []}
 
-    active_key = fetch_one(
+    active_key = await asyncio.to_thread(fetch_one,
         "SELECT id, api_key_ciphertext FROM upstream_keys WHERE status = 'active' LIMIT 1"
     )
     if not active_key:
@@ -2160,8 +2283,8 @@ async def sync_upstream_models(request: Request):
     except Exception as e:
         return {"error": f"解密密钥失败: {e}", "count": 0, "models": []}
 
-    base_url = get_setting("upstream_base_url") or "https://integrate.api.nvidia.com/v1"
-    models_path = get_setting("models_path") or "/models"
+    base_url = await asyncio.to_thread(get_setting, "upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+    models_path = await asyncio.to_thread(get_setting, "models_path") or "/models"
     url = f"{base_url}{models_path}"
 
     try:

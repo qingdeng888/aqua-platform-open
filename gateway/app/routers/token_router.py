@@ -1,3 +1,4 @@
+# 注意：本模块当前未接入主链路（v10 快照），修复保留待未来接线
 """
 TokenRouter v9.0 - 模块化路由引擎
 
@@ -93,9 +94,21 @@ class ChannelSelector:
         health_multiplier = state.get_health_multiplier()
 
         # 负载因子
+        # 修复：原 min(1.0, total_capacity / max(total_capacity, 1)) 是数学恒等式，恒等于 1.0
+        # 真实负载语义：该模型的密钥池中，已跟踪密钥里不可用（断路器开启/健康分不足）
+        # 的部分视为已占用容量 —— load = used_capacity / total_capacity，
+        # 池越空乘数越接近 1，占用越多乘数越低（乘数 = 1 - load）
         healthy_keys = self._health_probe.get_healthy_keys_for_model(context.model)
-        total_capacity = len(healthy_keys) if healthy_keys else 1
-        load_multiplier = min(1.0, total_capacity / max(total_capacity, 1))
+        model_states = [
+            v for k, v in self._health_probe.get_all_health().items()
+            if k.endswith(f":{context.model}")
+        ]
+        total_capacity = len(model_states)  # 该模型已跟踪的密钥数
+        used_capacity = total_capacity - len(healthy_keys)  # 其中不可用（已占用）的密钥数
+        if total_capacity > 0:
+            load_multiplier = max(0.0, 1.0 - used_capacity / total_capacity)
+        else:
+            load_multiplier = 1.0  # 无任何记录时保持中性乘数
 
         # 成功率因子
         if state.recent_total > 0:

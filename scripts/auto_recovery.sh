@@ -8,6 +8,9 @@ set -euo pipefail
 
 LOG_FILE="/var/log/acu-auto-recovery.log"
 
+# 虚拟环境目录（可通过环境变量覆盖；默认使用项目根目录下通用 venv）
+VENV_DIR="${VENV_DIR:-./venv}"
+
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
@@ -63,7 +66,7 @@ check_and_restart \
     8000 \
     "http://127.0.0.1:8000/healthz" \
     "./gateway" \
-    "./venv314/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level warning"
+    "$VENV_DIR/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level warning"
 
 # ========== 检查 Platform ==========
 check_and_restart \
@@ -71,7 +74,7 @@ check_and_restart \
     8001 \
     "http://127.0.0.1:8001/healthz" \
     "./platform" \
-    "./venv314/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --log-level warning"
+    "$VENV_DIR/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8001 --log-level warning"
 
 # ========== 检查 Nginx ==========
 if ! pgrep -x nginx > /dev/null; then

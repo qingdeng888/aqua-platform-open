@@ -1,3 +1,4 @@
+# 注意：本模块当前未接入主链路（v10 快照），修复保留待未来接线
 """
 Google Gemini ↔ OpenAI 协议转换器 - v9.0
 
@@ -50,6 +51,9 @@ class GeminiTransformer:
 
         # 转换消息
         contents = []
+        # 修复：Gemini 要求 functionResponse.name 与 functionCall.name 一致，
+        # 不能用 tool_call_id 充当 name —— 维护 tool_call_id → 函数名 的映射回填
+        tool_id_to_name: Dict[str, str] = {}
         for msg in remaining_messages:
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -84,21 +88,36 @@ class GeminiTransformer:
             if role == "assistant" and tool_calls:
                 for tc in tool_calls:
                     func = tc.get("function", {})
+                    args_raw = func.get("arguments", "{}")
+                    # 修复：arguments 畸形 JSON 时直接抛异常，改为兜底（args 必须是对象，回退空对象）
+                    try:
+                        fc_args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                    except json.JSONDecodeError:
+                        logger.warning(f"tool_call arguments 非法JSON，回退空对象: {args_raw[:200]}")
+                        fc_args = {}
                     parts.append({
                         "functionCall": {
                             "name": func.get("name", ""),
-                            "args": json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments", ""), str) else func.get("arguments", {}),
+                            "args": fc_args,
                         }
                     })
+                    # 记录 tool_call_id → 函数名 映射，供后续 tool 消息回填 name
+                    if tc.get("id"):
+                        tool_id_to_name[tc["id"]] = func.get("name", "")
 
             if role == "tool":
                 gemini_role = "user"
                 tool_call_id = msg.get("tool_call_id", "")
+                # 回填真实函数名（Gemini 要求与 functionCall.name 一致）；映射缺失时回退 tool_call_id
+                tool_name = tool_id_to_name.get(tool_call_id)
+                if not tool_name:
+                    tool_name = tool_call_id
+                    logger.debug(f"openai_to_gemini: tool_call_id={tool_call_id} 无对应函数名，回退用作 functionResponse.name")
                 parts = [{
                     "functionResponse": {
-                        "name": tool_call_id,
+                        "name": tool_name,
                         "response": {
-                            "name": tool_call_id,
+                            "name": tool_name,
                             "content": content if isinstance(content, str) else json.dumps(content),
                         }
                     }
@@ -165,6 +184,8 @@ class GeminiTransformer:
             if role == "user":
                 text_parts = []
                 for p in parts:
+                    if not isinstance(p, dict):
+                        continue
                     if "text" in p:
                         text_parts.append(p["text"])
                     elif "functionResponse" in p:
@@ -174,6 +195,19 @@ class GeminiTransformer:
                             "tool_call_id": fr.get("name", ""),
                             "content": json.dumps(fr.get("response", {})),
                         })
+                    elif "inlineData" in p or "inline_data" in p:
+                        # 修复：inlineData → OpenAI image_url base64 data URL（兼容 camelCase/snake_case）
+                        inline = p.get("inlineData") or p.get("inline_data") or {}
+                        mime = inline.get("mimeType", inline.get("mime_type", "image/jpeg"))
+                        openai["messages"].append({
+                            "role": "user",
+                            "content": [{
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime};base64,{inline.get('data', '')}"},
+                            }],
+                        })
+                    else:
+                        logger.debug(f"gemini_to_openai: 丢弃 user part 类型: {list(p.keys())}")
                 if text_parts:
                     openai["messages"].append({
                         "role": "user",
@@ -185,6 +219,8 @@ class GeminiTransformer:
                 text_parts = []
                 function_calls = []
                 for p in parts:
+                    if not isinstance(p, dict):
+                        continue
                     if "text" in p:
                         text_parts.append(p["text"])
                     elif "functionCall" in p:
@@ -197,12 +233,20 @@ class GeminiTransformer:
                                 "arguments": json.dumps(fc.get("args", {})),
                             }
                         })
+                    else:
+                        logger.debug(f"gemini_to_openai: 丢弃 model part 类型: {list(p.keys())}")
                 msg = {"role": "assistant"}
                 if text_parts:
                     msg["content"] = " ".join(text_parts)
+                else:
+                    msg["content"] = ""
                 if function_calls:
                     msg["tool_calls"] = function_calls
                 openai["messages"].append(msg)
+
+            else:
+                # 修复：未知 role 静默丢弃，记录日志便于排查
+                logger.debug(f"gemini_to_openai: 丢弃未知 role 的 content: {role}")
 
         return openai
 

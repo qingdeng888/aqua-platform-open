@@ -1,3 +1,4 @@
+# 注意：本模块当前未接入主链路（v10 快照），修复保留待未来接线
 """
 多协议转换模块 - Anthropic / Gemini / Ollama 协议适配
 
@@ -36,11 +37,62 @@ def anthropic_to_openai(body: dict) -> dict:
 
         # Anthropic的content可以是字符串或content block数组
         if isinstance(content, list):
+            # 修复：原先只提取 text，tool_use/tool_result/image 全部被丢弃
             text_parts = []
+            image_parts = []
+            tool_calls = []
             for block in content:
-                if block.get("type") == "text":
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype == "text":
                     text_parts.append(block.get("text", ""))
-            content = "\n".join(text_parts)
+                elif btype == "tool_use":
+                    # tool_use → OpenAI assistant tool_calls（id/name/arguments 透传）
+                    tool_calls.append({
+                        "id": block.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name", ""),
+                            "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                        },
+                    })
+                elif btype == "tool_result":
+                    # tool_result → 独立的 role="tool" 消息（tool_call_id 对应 tool_use id）
+                    inner = block.get("content", "")
+                    if isinstance(inner, list):
+                        # tool_result 的 content 也可能是 block 数组，提取文本
+                        inner = "\n".join(
+                            b.get("text", "") for b in inner
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": block.get("tool_use_id", ""),
+                        "content": inner if isinstance(inner, str) else json.dumps(inner, ensure_ascii=False),
+                    })
+                elif btype == "image":
+                    # image → OpenAI image_url（base64 data URL）
+                    source = block.get("source", {})
+                    media_type = source.get("media_type", "image/jpeg")
+                    image_parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{source.get('data', '')}"},
+                    })
+                else:
+                    logger.debug(f"anthropic_to_openai: 丢弃未知 content block 类型: {btype}")
+
+            if tool_calls:
+                # assistant 消息：文本 + tool_calls（不再被压成空串）
+                messages.append({"role": role, "content": "\n".join(text_parts), "tool_calls": tool_calls})
+            elif image_parts:
+                # 多模态消息：text + image_url 混合
+                parts = [{"type": "text", "text": t} for t in text_parts] + image_parts
+                messages.append({"role": role, "content": parts})
+            elif text_parts:
+                messages.append({"role": role, "content": "\n".join(text_parts)})
+            # 修复：纯 tool_result 消息已单独 append，不再追加空 content 消息
+            continue
 
         messages.append({"role": role, "content": content})
 
@@ -69,18 +121,36 @@ def openai_to_anthropic(data: dict, model: str) -> dict:
     """OpenAI响应 → Anthropic格式"""
     choices = data.get("choices", [])
     content_text = ""
+    finish_reason = ""
+    tool_calls = []
     if choices:
-        content_text = choices[0].get("message", {}).get("content", "")
+        message = choices[0].get("message", {}) or {}
+        content_text = message.get("content", "") or ""
+        finish_reason = choices[0].get("finish_reason", "") or ""
+        tool_calls = message.get("tool_calls", []) or []
 
     usage = data.get("usage", {})
+
+    # 修复：tool_calls 复用已定义的 openai_to_anthropic_tools 转换为 tool_use block
+    content_blocks = []
+    if content_text:
+        content_blocks.append({"type": "text", "text": content_text})
+    if tool_calls:
+        content_blocks.extend(openai_to_anthropic_tools(tool_calls))
+    if not content_blocks:
+        content_blocks.append({"type": "text", "text": ""})
+
+    # 修复：finish_reason → stop_reason 完整映射，不再恒 end_turn
+    stop_reason_map = {"tool_calls": "tool_use", "length": "max_tokens"}
+    stop_reason = stop_reason_map.get(finish_reason, "end_turn")
 
     return {
         "id": data.get("id", f"msg_{uuid.uuid4().hex[:24]}"),
         "type": "message",
         "role": "assistant",
         "model": model,
-        "content": [{"type": "text", "text": content_text}],
-        "stop_reason": "end_turn",
+        "content": content_blocks,
+        "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
@@ -89,61 +159,209 @@ def openai_to_anthropic(data: dict, model: str) -> dict:
     }
 
 
-def openai_stream_to_anthropic_stream(line: str, model: str) -> list:
-    """OpenAI流式行 → Anthropic流式事件"""
-    events = []
-    if not line.startswith("data: ") or line == "data: [DONE]":
-        if line == "data: [DONE]":
+class OpenAIToAnthropicStreamConverter:
+    """OpenAI SSE → Anthropic 流式事件转换器（有状态，每条流一个实例）
+
+    修复：补齐原先缺失的事件，并保证事件顺序符合 Anthropic SDK 规范：
+        message_start → content_block_start → deltas → content_block_stop
+        → message_delta → message_stop
+    - message_start 无条件先发（不再依赖 delta 里出现 role）
+    - 每个内容块前发 content_block_start，结束时发 content_block_stop
+    - delta 里的 tool_calls → input_json_delta（每个 tool_call 独立成块）
+    - message_delta 的 usage 使用真实累计值（不再写死 0）
+    """
+
+    def __init__(self, model: str = ""):
+        self.model = model
+        self._message_started = False   # message_start 是否已发
+        self._message_stopped = False   # message_stop 是否已发
+        self._message_delta_sent = False  # message_delta 是否已发
+        self._next_index = 0            # 下一个内容块索引
+        self._open_text_block = None    # 当前打开的 text 块索引
+        self._open_tool_block = None    # 当前打开的 tool_use 块索引
+        self._tool_block_index = {}     # OpenAI tool_call index → Anthropic 块索引
+        self._input_tokens = 0          # 累计 usage（来自上游 chunk）
+        self._output_tokens = 0
+        self._output_chars = 0          # 累计输出字符数（无 usage 时估算兜底）
+
+    def _emit_message_start(self, msg_id: str) -> dict:
+        self._message_started = True
+        return {
+            "type": "message_start",
+            "message": {
+                "id": msg_id or f"msg_{uuid.uuid4().hex[:24]}",
+                "type": "message",
+                "role": "assistant",
+                "model": self.model,
+                "content": [],
+                "stop_reason": None,
+                "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
+        }
+
+    def _open_text(self) -> list:
+        """打开 text 内容块（若未打开），返回需要补发的事件"""
+        if self._open_text_block is None:
+            events = self._close_current()
+            idx = self._next_index
+            self._next_index += 1
+            self._open_text_block = idx
             events.append({
-                "type": "message_stop",
+                "type": "content_block_start",
+                "index": idx,
+                "content_block": {"type": "text", "text": ""},
             })
+            return events
+        return []
+
+    def _open_tool(self, block_index: int) -> list:
+        """打开（或切换到）tool_use 内容块，返回需要补发的事件"""
+        events = self._close_current()
+        self._open_tool_block = block_index
         return events
 
-    try:
-        data = json.loads(line[6:])
-    except json.JSONDecodeError:
+    def _close_current(self) -> list:
+        """关闭当前打开的内容块，返回 content_block_stop 事件"""
+        events = []
+        if self._open_text_block is not None:
+            events.append({"type": "content_block_stop", "index": self._open_text_block})
+            self._open_text_block = None
+        if self._open_tool_block is not None:
+            events.append({"type": "content_block_stop", "index": self._open_tool_block})
+            self._open_tool_block = None
         return events
 
-    choices = data.get("choices", [])
-    if choices:
-        delta = choices[0].get("delta", {})
+    def _accumulated_usage(self) -> int:
+        """累计 output_tokens：优先上游 usage；缺失时按累计字符估算（约4字符=1token）"""
+        if self._output_tokens > 0:
+            return self._output_tokens
+        return max(1, self._output_chars // 4) if self._output_chars > 0 else 0
 
-        # 首个消息开始事件
-        if data.get("choices", [{}])[0].get("finish_reason") is None:
-            if "role" in delta:
-                events.append({
-                    "type": "message_start",
-                    "message": {
-                        "id": data.get("id", ""),
-                        "type": "message",
-                        "role": "assistant",
-                        "model": model,
-                        "content": [],
-                        "stop_reason": None,
-                        "stop_sequence": None,
-                        "usage": {"input_tokens": 0, "output_tokens": 0},
-                    },
-                })
+    def _emit_message_delta(self, finish_reason) -> dict:
+        self._message_delta_sent = True
+        stop_reason_map = {"tool_calls": "tool_use", "length": "max_tokens"}
+        return {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason_map.get(finish_reason, "end_turn"), "stop_sequence": None},
+            # 修复：usage 使用真实累计值，不再写死 0
+            "usage": {"input_tokens": self._input_tokens, "output_tokens": self._accumulated_usage()},
+        }
 
-        # 内容块
-        if "content" in delta and delta["content"]:
+    def convert(self, line: str) -> list:
+        """转换单行 OpenAI SSE，返回 0..n 个 Anthropic 事件"""
+        events = []
+        if not line.startswith("data: "):
+            return events
+        payload = line[6:]
+
+        # ---- 流结束：收尾 + message_stop ----
+        if payload.strip() == "[DONE]":
+            if self._message_stopped:
+                return events
+            # 上游未发 finish_reason 时兜底补 message_start/message_delta
+            if not self._message_started:
+                events.append(self._emit_message_start(""))
+            if not self._message_delta_sent:
+                events.extend(self._close_current())
+                events.append(self._emit_message_delta(None))
+            events.append({"type": "message_stop"})
+            self._message_stopped = True
+            return events
+
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            return events
+
+        # message_start 无条件先发（修复：原先依赖 delta.role 才发，常导致缺失）
+        if not self._message_started:
+            events.append(self._emit_message_start(data.get("id", "")))
+
+        # 累计 usage（部分上游在最后一个 chunk 携带 usage）
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            if usage.get("prompt_tokens"):
+                self._input_tokens = max(self._input_tokens, int(usage["prompt_tokens"]))
+            if usage.get("completion_tokens"):
+                self._output_tokens = max(self._output_tokens, int(usage["completion_tokens"]))
+
+        choices = data.get("choices", [])
+        delta = {}
+        finish_reason = None
+        if choices:
+            delta = choices[0].get("delta", {}) or {}
+            finish_reason = choices[0].get("finish_reason")
+
+        # 文本增量 → text_delta
+        content = delta.get("content")
+        if content:
+            self._output_chars += len(content)
+            events.extend(self._open_text())
             events.append({
                 "type": "content_block_delta",
-                "index": 0,
-                "delta": {"type": "text_delta", "text": delta["content"]},
+                "index": self._open_text_block,
+                "delta": {"type": "text_delta", "text": content},
             })
 
-        # 结束
-        finish_reason = choices[0].get("finish_reason")
+        # 工具调用增量 → input_json_delta（修复：原先完全未处理）
+        for tc in delta.get("tool_calls", []) or []:
+            if not isinstance(tc, dict):
+                continue
+            tc_index = tc.get("index", 0)
+            func = tc.get("function", {}) or {}
+            arguments = func.get("arguments", "") or ""
+            name = func.get("name", "") or ""
+            tc_id = tc.get("id", "") or ""
+            if tc_index not in self._tool_block_index:
+                # 新 tool_call：分配新块并发 content_block_start
+                block_index = self._next_index
+                self._next_index += 1
+                self._tool_block_index[tc_index] = block_index
+                events.extend(self._open_tool(block_index))
+                events.append({
+                    "type": "content_block_start",
+                    "index": block_index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": tc_id or f"toolu_{uuid.uuid4().hex[:24]}",
+                        "name": name,
+                        "input": {},
+                    },
+                })
+            else:
+                block_index = self._tool_block_index[tc_index]
+                if self._open_tool_block != block_index:
+                    # 片段路由到已开过的块：先关闭当前块再切回（实际流中极少出现）
+                    events.extend(self._close_current())
+                    self._open_tool_block = block_index
+            if arguments:
+                self._output_chars += len(arguments)
+                events.append({
+                    "type": "content_block_delta",
+                    "index": block_index,
+                    "delta": {"type": "input_json_delta", "partial_json": arguments},
+                })
+
+        # 结束：关闭所有内容块 + message_delta
         if finish_reason:
-            events.append({"type": "content_block_stop", "index": 0})
-            events.append({
-                "type": "message_delta",
-                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                "usage": {"output_tokens": 0},
-            })
+            if not self._message_delta_sent:
+                events.extend(self._close_current())
+                events.append(self._emit_message_delta(finish_reason))
 
-    return events
+        return events
+
+
+def openai_stream_to_anthropic_stream(line: str, model: str, state=None) -> list:
+    """OpenAI流式行 → Anthropic流式事件
+
+    修复：补齐 message_start / content_block_start / content_block_stop /
+    input_json_delta 等事件，usage 用真实累计值，事件顺序符合 Anthropic SDK 规范。
+    流式转换需要跨行保持状态：请为每条流传入同一个 state
+    （OpenAIToAnthropicStreamConverter 实例）；不传时按独立流处理（仅单行语义兼容旧行为）。
+    """
+    converter = state if isinstance(state, OpenAIToAnthropicStreamConverter) else OpenAIToAnthropicStreamConverter(model)
+    return converter.convert(line)
 
 
 # ========== Gemini 协议转换 ==========
@@ -168,8 +386,63 @@ def gemini_to_openai(body: dict, model: str) -> dict:
             role = "assistant"
 
         parts = content.get("parts", [])
-        text_parts = [p.get("text", "") for p in parts if "text" in p]
-        messages.append({"role": role, "content": "\n".join(text_parts)})
+        # 修复：原先只提取 text —— 补齐 functionCall / functionResponse / inlineData
+        if role == "assistant":
+            text_parts = []
+            tool_calls = []
+            for p in parts:
+                if not isinstance(p, dict):
+                    continue
+                if "text" in p:
+                    text_parts.append(p["text"])
+                elif "functionCall" in p:
+                    # functionCall → assistant tool_calls（Gemini 无 id，用 name 作 id 便于 tool 消息对应）
+                    fc = p["functionCall"]
+                    tool_calls.append({
+                        "id": fc.get("name", ""),
+                        "type": "function",
+                        "function": {
+                            "name": fc.get("name", ""),
+                            "arguments": json.dumps(fc.get("args", {}), ensure_ascii=False),
+                        },
+                    })
+                else:
+                    logger.debug(f"gemini_to_openai: 丢弃 assistant part 类型: {list(p.keys())}")
+            msg = {"role": "assistant", "content": "\n".join(text_parts)}
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
+            messages.append(msg)
+        else:
+            # user 消息：可能携带 text / functionResponse / inlineData
+            text_parts = []
+            for p in parts:
+                if not isinstance(p, dict):
+                    continue
+                if "text" in p:
+                    text_parts.append(p["text"])
+                elif "functionResponse" in p:
+                    # functionResponse → role="tool" 消息（tool_call_id 即 functionResponse.name）
+                    fr = p["functionResponse"]
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": fr.get("name", ""),
+                        "content": json.dumps(fr.get("response", {}), ensure_ascii=False),
+                    })
+                elif "inlineData" in p or "inline_data" in p:
+                    # inlineData → image_url base64 data URL（兼容 camelCase/snake_case）
+                    inline = p.get("inlineData") or p.get("inline_data") or {}
+                    mime = inline.get("mimeType", inline.get("mime_type", "image/jpeg"))
+                    messages.append({
+                        "role": role,
+                        "content": [{
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{inline.get('data', '')}"},
+                        }],
+                    })
+                else:
+                    logger.debug(f"gemini_to_openai: 丢弃 user part 类型: {list(p.keys())}")
+            if text_parts:
+                messages.append({"role": role, "content": "\n".join(text_parts)})
 
     result = {
         "model": model,

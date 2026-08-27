@@ -26,12 +26,19 @@ logger = logging.getLogger("acu.database")
 _pool = None
 
 
+# 连接池上限（可经环境变量 GW_DB_POOL_SIZE 调整，默认30）
+POOL_MAXCONN = max(5, int(os.environ.get("GW_DB_POOL_SIZE", "30")))
+
+
 def _init_pool():
     """初始化连接池"""
     global _pool
     if _pool is None:
+        # 惰性校验：不在 import 时硬失败（纯函数/测试导入不再被迫先配环境变量），首次真正建池时才拦截
+        if not PG_PASSWORD:
+            raise RuntimeError("[FATAL] 环境变量 PG_PASSWORD 未设置！请设置后重新启动。")
         _pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=5, maxconn=30,
+            minconn=5, maxconn=POOL_MAXCONN,
             host=PG_HOST, port=PG_PORT, dbname=PG_DB,
             user=PG_USER, password=PG_PASSWORD,
         )
@@ -43,19 +50,23 @@ PG_PORT = int(os.environ.get("PG_PORT", "5432"))
 PG_DB = os.environ.get("PG_DB", "aqua_gateway")
 PG_USER = os.environ.get("PG_USER", "aqua")
 PG_PASSWORD = os.environ.get("PG_PASSWORD")
-if not PG_PASSWORD:
-    raise RuntimeError("[FATAL] 环境变量 PG_PASSWORD 未设置！请设置后重新启动。")
 
 # 中国标准时区 UTC+8
 CST = timezone(timedelta(hours=8))
 
 
 def _get_conn():
-    """从连接池获取 PostgreSQL 连接"""
+    """从连接池获取 PostgreSQL 连接
+
+    修复：设 autocommit=True（方案选择：autocommit 而非 except 中 rollback）。
+    语句即时提交，SELECT 之后归还连接不残留事务；SQL 异常时连接上没有
+    中止的事务，归还连接池不会"带毒"（原实现异常路径不 rollback，
+    aborted transaction 会让后续复用该连接的请求全部报错）。
+    """
     if _pool is None:
         _init_pool()
     conn = _pool.getconn()
-    conn.autocommit = False
+    conn.autocommit = True  # 自动提交：无残留事务，异常不带毒回池
     # 使用 RealDictCursor 使返回行为 dict
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     return conn
@@ -67,10 +78,31 @@ def _put_conn(conn):
         _pool.putconn(conn)
 
 
+def warmup_pool(count: int = 3) -> None:
+    """预热连接池：取放 count 条连接，摊平首请求的建连开销（启动时调用一次）"""
+    if _pool is None:
+        _init_pool()
+    conns = []
+    try:
+        for _ in range(count):
+            conns.append(_get_conn())
+    except Exception as e:
+        logger.warning(f"连接池预热部分失败(不影响启动): {e}")
+    finally:
+        for conn in conns:
+            _put_conn(conn)
+
+
 def utcnow() -> str:
-    """返回ISO格式UTC时间（毫秒精度）"""
+    """返回ISO格式UTC时间（毫秒精度，Z格式）。写库时间戳统一使用本函数"""
     now = datetime.now(timezone.utc)
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def utcnow_minus(seconds: int) -> str:
+    """返回N秒前的UTC时间（Z格式，毫秒精度）——契约函数，供时间窗口查询边界使用"""
+    target = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    return target.strftime("%Y-%m-%dT%H:%M:%S.") + f"{target.microsecond // 1000:03d}Z"
 
 
 def localnow() -> str:
@@ -110,12 +142,11 @@ def days_ago_utc(days: int) -> str:
 
 
 def execute(sql: str, params: tuple = ()) -> int:
-    """执行写操作并提交，返回受影响的行数"""
+    """执行写操作，返回受影响的行数（autocommit 模式下语句即时提交，无需显式 commit）"""
     conn = _get_conn()
     try:
         cur = conn.cursor()
         cur.execute(sql, params)
-        conn.commit()
         return cur.rowcount
     finally:
         _put_conn(conn)

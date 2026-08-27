@@ -1,0 +1,197 @@
+/* 职责：设计令牌（颜色/圆角/阴影/间距/字号）、重置、排版、通用工具类与全局动画 */
+
+/* ===== 设计令牌：深色主题（与网关控制台 #1a1a2e / #00d4ff 体系呼应） ===== */
+:root {
+  /* 背景 */
+  --bg-primary: #0a0e27;
+  --bg-secondary: #131836;
+  --bg-card: #1a1f3a;
+  --bg-hover: #232a4d;
+  --bg-input: #0f1428;
+
+  /* 文字 */
+  --text-primary: #e6e9f5;
+  --text-secondary: #8b92b8;
+  --text-muted: #5a6188;
+
+  /* 强调色 */
+  --accent-primary: #00d4ff;
+  --accent-success: #00e676;
+  --accent-warning: #ffab00;
+  --accent-danger: #ff5252;
+  --accent-info: #448aff;
+  --accent-purple: #7c4dff;
+  --accent-bg: rgba(0, 212, 255, 0.12);
+
+  /* 边框 */
+  --border-color: #2a3052;
+  --border-light: #1f2540;
+
+  /* 状态色 */
+  --status-active: #00e676;
+  --status-cooling: #ff5252;
+  --status-softbusy: #ffab00;
+  --status-isolated: #5a6188;
+
+  /* 圆角 */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 999px;
+
+  /* 阴影 */
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 12px rgba(0, 212, 255, 0.3);
+
+  /* 间距刻度 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* 字号 */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-md: 13px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 26px;
+
+  /* 布局尺寸 */
+  --sidebar-width: 224px;
+  --header-height: 56px;
+
+  /* 层级 */
+  --z-navbar: 100;
+  --z-sidebar: 110;
+  --z-overlay: 105;
+  --z-modal: 1000;
+  --z-toast: 2000;
+
+  /* 过渡 */
+  --transition: all 0.2s ease;
+  --transition-slow: all 0.3s ease;
+}
+
+/* ===== 浅色主题（沿用原有映射） ===== */
+[data-theme="light"] {
+  --bg-primary: #f5f7fa;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+  --bg-hover: #e8eaed;
+  --bg-input: #f0f2f5;
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a4a6a;
+  --text-muted: #8888a0;
+  --accent-primary: #0088cc;
+  --accent-bg: rgba(0, 136, 204, 0.1);
+  --border-color: #d8dbe6;
+  --border-light: #e8eaf2;
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --shadow-glow: 0 0 12px rgba(0, 136, 204, 0.25);
+}
+
+/* ===== 重置 ===== */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  transition: background 0.3s ease, color 0.3s ease;
+}
+
+a { color: var(--accent-primary); text-decoration: none; transition: var(--transition); }
+a:hover { color: var(--accent-primary); filter: brightness(1.15); }
+
+button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, textarea, select { font-family: inherit; font-size: inherit; }
+
+code { font-family: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace; font-size: 0.92em; }
+
+ul, ol { padding-left: 20px; }
+
+::selection { background: rgba(0, 212, 255, 0.3); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: var(--bg-secondary); }
+::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ===== 全局动画 ===== */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.8s linear infinite; transform-origin: center; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* 页面切入过渡（路由切换时由 router 添加） */
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.page-enter { animation: pageIn 0.25s ease both; }
+
+/* 骨架屏微光 */
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+/* 聊天流式光标 */
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.stream-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent-primary);
+  border-radius: 1px;
+  animation: blink 0.9s step-end infinite;
+}
+
+/* 浮动QQ按钮呼吸 */
+@keyframes float-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 4px 16px rgba(18, 183, 245, 0.4); }
+  50% { transform: scale(1.08); box-shadow: 0 6px 24px rgba(18, 183, 245, 0.55); }
+}
+
+/* ===== 工具类 ===== */
+.muted { color: var(--text-muted); font-size: var(--text-sm); }
+.text-xs { font-size: var(--text-xs); }
+.text-muted { color: var(--text-muted); }
+.text-danger { color: var(--accent-danger); }
+.text-center { text-align: center; }
+.flex { display: flex; align-items: center; gap: var(--space-2); }
+.flex-between { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.mt-2 { margin-top: var(--space-2); }
+.mt-3 { margin-top: var(--space-3); }
+.mt-4 { margin-top: var(--space-4); }
+.mb-2 { margin-bottom: var(--space-2); }
+.mb-3 { margin-bottom: var(--space-3); }
+.mb-4 { margin-bottom: var(--space-4); }
