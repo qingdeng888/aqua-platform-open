@@ -1,0 +1,21 @@
+name: ci
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  tests:
+    name: 'Tests'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.x
+      - run: npm install
+      - run: npm run test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

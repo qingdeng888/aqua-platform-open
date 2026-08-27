@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AQUA 管理后台 v10.0</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1118;color:#e0e0e0;min-height:100vh}
+/* Login */
+.login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.login-card{background:#1a1d2e;border:1px solid #2a2d3e;border-radius:12px;padding:40px;width:100%;max-width:380px;text-align:center}
+.login-card h1{font-size:20px;margin-bottom:4px;color:#fff}
+.login-card p{font-size:13px;color:#888;margin-bottom:24px}
+.login-card .logo{width:48px;height:48px;border-radius:12px;background:linear-gradient(135deg,#00d4ff,#448aff);display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px;color:#0a0e27;font-size:22px;font-weight:bold}
+.form-group{margin-bottom:14px;text-align:left}
+.form-group label{display:block;font-size:12px;color:#888;margin-bottom:4px}
+.form-group input{width:100%;padding:10px 12px;background:#0f1118;border:1px solid #2a2d3e;border-radius:8px;color:#e0e0e0;font-size:14px;outline:none;transition:border-color .2s}
+.form-group input:focus{border-color:#448aff}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 18px;border-radius:8px;border:none;font-size:13px;cursor:pointer;font-family:inherit;transition:all .15s}
+.btn-primary{width:100%;background:linear-gradient(135deg,#00d4ff,#448aff);color:#0a0e27;font-weight:600;padding:10px}
+.btn-primary:hover{filter:brightness(1.1)}
+.btn-primary:disabled{opacity:.5;cursor:not-allowed}
+.btn-sm{padding:5px 12px;font-size:12px}
+.btn-danger{background:#e53935;color:#fff}
+.btn-danger:hover{background:#c62828}
+.btn-warning{background:#fb8c00;color:#fff}
+.btn-warning:hover{background:#ef6c00}
+.btn-success{background:#43a047;color:#fff}
+.btn-success:hover{background:#2e7d32}
+.btn-outline{background:transparent;border:1px solid #2a2d3e;color:#e0e0e0}
+.btn-outline:hover{background:#1a1d2e}
+.login-error{font-size:12px;color:#e53935;margin-top:10px;min-height:18px}
+/* Layout */
+.admin-wrap{display:none;flex-direction:column;min-height:100vh}
+.admin-header{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;background:#1a1d2e;border-bottom:1px solid #2a2d3e}
+.admin-header h2{font-size:16px;color:#fff}
+.header-actions{display:flex;gap:8px}
+.admin-main{flex:1;padding:20px 24px;max-width:1200px;margin:0 auto;width:100%}
+/* Stats */
+.stats-bar{display:flex;gap:12px;margin-bottom:16px}
+.stat-box{flex:1;background:#1a1d2e;border:1px solid #2a2d3e;border-radius:8px;padding:12px 16px}
+.stat-box .num{font-size:20px;font-weight:700;color:#fff}
+.stat-box .lbl{font-size:11px;color:#888;margin-top:2px}
+/* Search */
+.toolbar{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.search-input{flex:1;min-width:200px;padding:8px 12px;background:#0f1118;border:1px solid #2a2d3e;border-radius:8px;color:#e0e0e0;font-size:13px;outline:none}
+.search-input:focus{border-color:#448aff}
+.filter-select{padding:8px 12px;background:#0f1118;border:1px solid #2a2d3e;border-radius:8px;color:#e0e0e0;font-size:13px;outline:none}
+/* Table */
+.table-wrap{background:#1a1d2e;border:1px solid #2a2d3e;border-radius:8px;overflow:hidden}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:10px 14px;font-size:11px;color:#888;text-transform:uppercase;background:#131624;border-bottom:1px solid #2a2d3e;white-space:nowrap}
+td{padding:10px 14px;font-size:13px;border-bottom:1px solid #222538}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.03)}
+.status-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500}
+.status-active{background:rgba(67,160,71,.15);color:#43a047}
+.status-banned{background:rgba(229,57,53,.15);color:#e53935}
+.mono{font-family:'SF Mono','Cascadia Code',monospace;font-size:12px}
+.text-muted{color:#666}
+.pagination{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:#131624;border-top:1px solid #2a2d3e}
+.pagination .page-info{font-size:12px;color:#888}
+.pagination .page-btns{display:flex;gap:4px}
+.pagination .page-btns button{padding:4px 10px;border-radius:4px;border:1px solid #2a2d3e;background:transparent;color:#e0e0e0;font-size:12px;cursor:pointer}
+.pagination .page-btns button:disabled{opacity:.3;cursor:not-allowed}
+.pagination .page-btns button:hover:not(:disabled){background:#1a1d2e}
+/* Modal */
+.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
+.modal-box{background:#1a1d2e;border:1px solid #2a2d3e;border-radius:12px;width:90%;max-width:420px;padding:24px}
+.modal-box h3{font-size:16px;margin-bottom:8px;color:#fff}
+.modal-box p{font-size:13px;color:#888;margin-bottom:16px}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end}
+/* Toast */
+.toast-wrap{position:fixed;top:20px;right:20px;z-index:2000;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.toast{padding:10px 16px;border-radius:8px;font-size:13px;pointer-events:auto;animation:slideIn .2s ease}
+.toast.success{background:#1b5e20;color:#a5d6a7;border:1px solid #2e7d32}
+.toast.error{background:#b71c1c;color:#ef9a9a;border:1px solid #c62828}
+.toast.info{background:#0d47a1;color:#90caf9;border:1px solid #1565c0}
+@keyframes slideIn{from{transform:translateX(40px);opacity:0}to{transform:translateX(0);opacity:1}}
+.empty-state{text-align:center;padding:40px;color:#666;font-size:14px}
+</style>
+</head>
+<body>
+
+<div id="loginScreen" class="login-wrap">
+  <div class="login-card">
+    <div class="logo">A</div>
+    <h1>AQUA 管理后台</h1>
+    <p>请输入管理员密码</p>
+    <form id="loginForm">
+      <div class="form-group">
+        <label>管理员密码</label>
+        <input type="password" id="passwordInput" placeholder="输入密码" required autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn btn-primary" id="loginBtn">登录</button>
+    </form>
+    <div class="login-error" id="loginError"></div>
+  </div>
+</div>
+
+<div class="admin-wrap" id="adminWrap">
+  <header class="admin-header">
+    <h2>👥 AQUA 用户管理</h2>
+    <div class="header-actions">
+      <button class="btn btn-sm btn-outline" onclick="loadUsers()">🔄 刷新</button>
+      <button class="btn btn-sm btn-danger" onclick="logout()">退出</button>
+    </div>
+  </header>
+  <main class="admin-main">
+    <div class="stats-bar" id="statsBar"></div>
+    <div class="toolbar">
+      <input class="search-input" id="searchInput" placeholder="搜索用户名、邮箱..." oninput="debounceSearch()">
+      <select class="filter-select" id="statusFilter" onchange="loadUsers()">
+        <option value="">全部状态</option>
+        <option value="active">正常</option>
+        <option value="banned">封禁</option>
+      </select>
+    </div>
+    <div class="table-wrap" id="tableWrap">
+      <div class="empty-state">加载中...</div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal-box">
+    <h3 id="modalTitle">确认操作</h3>
+    <p id="modalBody">确定要执行此操作吗？</p>
+    <div class="modal-actions">
+      <button class="btn btn-sm btn-outline" onclick="closeModal()">取消</button>
+      <button class="btn btn-sm btn-danger" id="modalConfirmBtn" onclick="modalConfirm()">确定</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script>
+// ========== State ==========
+const state = {
+  users: [],
+  total: 0,
+  page: 1,
+  pageSize: 20,
+  modalAction: null,
+}
+
+// ========== HTTP ==========
+const API = {
+  async req(method, url, body) {
+    const opts = { method, headers: {'Content-Type':'application/json'}, credentials:'same-origin' }
+    if (body) opts.body = JSON.stringify(body)
+    const resp = await fetch(url, opts)
+    if (!resp.ok) {
+      let msg = `请求失败 (${resp.status})`
+      try { const e = await resp.json(); msg = e.detail || msg } catch {}
+      throw new Error(msg)
+    }
+    return resp.json()
+  },
+  get: (url) => API.req('GET', url),
+  post: (url, body) => API.req('POST', url, body),
+  put: (url, body) => API.req('PUT', url, body),
+  del: (url) => API.req('DELETE', url),
+}
+
+// ========== Toast ==========
+function toast(msg, type='info') {
+  const wrap = document.getElementById('toastWrap')
+  const el = document.createElement('div')
+  el.className = 'toast ' + type
+  el.textContent = msg
+  wrap.appendChild(el)
+  setTimeout(() => { el.style.opacity='0'; setTimeout(() => el.remove(), 300) }, 2500)
+}
+
+// ========== Modal ==========
+function showModal(title, body, danger, onConfirm) {
+  document.getElementById('modalTitle').textContent = title
+  document.getElementById('modalBody').textContent = body
+  const btn = document.getElementById('modalConfirmBtn')
+  btn.textContent = danger ? '确定删除' : '确定'
+  btn.className = 'btn btn-sm ' + (danger ? 'btn-danger' : 'btn-warning')
+  state.modalAction = onConfirm
+  document.getElementById('modalOverlay').style.display = 'flex'
+}
+function closeModal() {
+  document.getElementById('modalOverlay').style.display = 'none'
+  state.modalAction = null
+}
+function modalConfirm() {
+  if (state.modalAction) state.modalAction()
+  closeModal()
+}
+
+// ========== Auth ==========
+async function doLogin(password) {
+  const btn = document.getElementById('loginBtn')
+  const errEl = document.getElementById('loginError')
+  btn.disabled = true; btn.textContent = '登录中...'; errEl.textContent = ''
+  try {
+    await API.post('/api/admin/login', { password })
+    document.getElementById('loginScreen').style.display = 'none'
+    document.getElementById('adminWrap').style.display = 'flex'
+    loadUsers()
+  } catch (e) { errEl.textContent = e.message
+  } finally { btn.disabled = false; btn.textContent = '登录' }
+}
+
+async function checkAuth() {
+  try {
+    const r = await API.get('/api/admin/check')
+    if (r.logged_in) {
+      document.getElementById('loginScreen').style.display = 'none'
+      document.getElementById('adminWrap').style.display = 'flex'
+      loadUsers()
+    }
+  } catch {}
+}
+
+async function logout() {
+  await API.post('/api/admin/logout')
+  document.getElementById('adminWrap').style.display = 'none'
+  document.getElementById('loginScreen').style.display = 'flex'
+  toast('已登出', 'info')
+}
+
+// ========== Users ==========
+async function loadUsers() {
+  const wrap = document.getElementById('tableWrap')
+  wrap.innerHTML = '<div class="empty-state">加载中...</div>'
+  try {
+    const search = document.getElementById('searchInput').value
+    const status = document.getElementById('statusFilter').value
+    const r = await API.get(`/api/admin/users?page=${state.page}&page_size=${state.pageSize}&search=${encodeURIComponent(search)}&status=${status}`)
+    state.users = r.users
+    state.total = r.total
+    renderTable()
+  } catch (e) { wrap.innerHTML = `<div class="empty-state">加载失败: ${e.message}</div>` }
+}
+
+function renderTable() {
+  const wrap = document.getElementById('tableWrap')
+  const users = state.users
+  if (!users.length) {
+    wrap.innerHTML = '<div class="empty-state">暂无用户数据</div>'
+    updateStats()
+    return
+  }
+
+  let html = `<table><thead><tr>
+    <th>ID</th><th>用户名</th><th>邮箱</th><th>状态</th><th>注册时间</th><th>操作</th>
+  </tr></thead><tbody>`
+  for (const u of users) {
+    const statusCls = u.status === 'active' ? 'status-active' : 'status-banned'
+    const statusLabel = u.status === 'active' ? '正常' : '封禁'
+    html += `<tr>
+      <td class="mono text-muted">${u.id}</td>
+      <td><strong>${esc(u.username)}</strong></td>
+      <td class="text-muted">${esc(u.email)}</td>
+      <td><span class="status-badge ${statusCls}">${statusLabel}</span></td>
+      <td class="text-muted mono">${fmtTime(u.created_at)}</td>
+      <td style="white-space:nowrap">
+        ${u.status === 'active'
+          ? `<button class="btn btn-sm btn-warning" onclick="banUser(${u.id},'${escAttr(u.username)}')">封禁</button> `
+          : `<button class="btn btn-sm btn-success" onclick="unbanUser(${u.id},'${escAttr(u.username)}')">解封</button> `
+        }
+        <button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id},'${escAttr(u.username)}')">删除</button>
+      </td>
+    </tr>`
+  }
+  html += '</tbody></table>'
+
+  const totalPages = Math.max(1, Math.ceil(state.total / state.pageSize))
+  html += `<div class="pagination">
+    <span class="page-info">共 ${state.total} 条，第 ${state.page}/${totalPages} 页</span>
+    <div class="page-btns">
+      <button ${state.page<=1?'disabled':''} onclick="goPage(${state.page-1})">上一页</button>
+      <button ${state.page>=totalPages?'disabled':''} onclick="goPage(${state.page+1})">下一页</button>
+    </div>
+  </div>`
+
+  wrap.innerHTML = html
+  updateStats()
+}
+
+function updateStats() {
+  const total = state.total
+  document.getElementById('statsBar').innerHTML = `
+    <div class="stat-box"><div class="num">${total}</div><div class="lbl">总用户</div></div>
+    <div class="stat-box"><div class="num">${state.users.filter(u=>u.status==='active').length}</div><div class="lbl">当前正常</div></div>
+    <div class="stat-box"><div class="num">${state.users.filter(u=>u.status==='banned').length}</div><div class="lbl">当前封禁</div></div>
+  `
+}
+
+function goPage(p) {
+  state.page = p
+  loadUsers()
+}
+
+let searchTimer = null
+function debounceSearch() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => { state.page = 1; loadUsers() }, 400)
+}
+
+// ========== Actions ==========
+async function banUser(id, name) {
+  showModal('封禁用户', `确定要封禁用户「${name}」吗？`, false, async () => {
+    try {
+      await API.put(`/api/admin/users/${id}/ban`)
+      toast(`用户 ${name} 已封禁`, 'success')
+      loadUsers()
+    } catch (e) { toast(e.message, 'error') }
+  })
+}
+
+async function unbanUser(id, name) {
+  showModal('解封用户', `确定要解封用户「${name}」吗？`, false, async () => {
+    try {
+      await API.put(`/api/admin/users/${id}/unban`)
+      toast(`用户 ${name} 已解封`, 'success')
+      loadUsers()
+    } catch (e) { toast(e.message, 'error') }
+  })
+}
+
+function deleteUser(id, name) {
+  showModal('删除用户', `确定要删除用户「${name}」及其所有数据吗？此操作不可恢复！`, true, async () => {
+    try {
+      await API.del(`/api/admin/users/${id}`)
+      toast(`用户 ${name} 已删除`, 'success')
+      loadUsers()
+    } catch (e) { toast(e.message, 'error') }
+  })
+}
+
+// ========== Utils ==========
+function esc(s) { if (!s) return ''; return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+function escAttr(s) { if (!s) return ''; return String(s).replace(/'/g,"&apos;").replace(/"/g,"&quot;") }
+function fmtTime(t) { if (!t) return '-'; return t.slice(0,10) + ' ' + t.slice(11,16) }
+
+// ========== Init ==========
+document.getElementById('loginForm').addEventListener('submit', e => {
+  e.preventDefault()
+  const pwd = document.getElementById('passwordInput').value
+  if (pwd) doLogin(pwd)
+})
+document.getElementById('modalOverlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('modalOverlay')) closeModal()
+})
+document.addEventListener('DOMContentLoaded', checkAuth)
+</script>
+</body>
+</html>

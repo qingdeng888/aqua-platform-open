@@ -1,0 +1,47 @@
+# ===== 敏感配置（严禁上传）=====
+# 运行时环境变量——含管理员密码/加密密钥/数据库密码/Gateway内部令牌，绝不能进 git
+.env
+.env.*
+!.env.example
+# 部署/密钥类
+*.pem
+*.key
+*.p12
+*.pfx
+*.enc
+*nvapi*
+*api_key*.txt
+*credential*
+*secret*.json
+
+# ===== Python =====
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.po
+*.mo
+.eggs/
+build/
+dist/
+*.egg-info/
+
+# ===== 数据库 =====
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.pgbackup
+*.bak
+
+# ===== Node / 前端 =====
+node_modules/
+dist/
+*.log
+
+# ===== 系统 & 编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,3196 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>AQUA AI平台</title>
+  <meta name="description" content="AQUA AI平台 - 66+ 可用模型免费使用">
+  <link rel="stylesheet" href="/static/css/platform.css?v=8.9">
+</head>
+<body>
+
+  <!-- 顶部导航栏 -->
+  <nav id="navbar" class="navbar">
+    <div class="navbar-inner">
+      <div class="navbar-brand">
+        <a href="#/" class="brand-logo">
+          <span id="brand-logo-icon"></span>
+          <span class="brand-name">AQUA</span>
+          <span class="brand-tag">AI平台</span>
+        </a>
+      </div>
+      <div class="navbar-links" id="navbar-links">
+        <a href="#/" data-route="/">首页</a>
+        <a href="#/models" data-route="/models">模型</a>
+        <a href="#/docs" data-route="/docs">API文档</a>
+        <a href="#/sponsor" data-route="/sponsor" style="color:var(--accent-warning)">赞助</a>
+      </div>
+      <div class="navbar-actions">
+        <button id="hamburger-btn" class="hamburger-btn" title="菜单" onclick="toggleMobileSidebar()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
+        <button id="theme-toggle" class="icon-btn" title="切换主题" onclick="Theme.toggle()"></button>
+        <div id="auth-area"></div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- 主布局 -->
+  <div id="main-layout" class="main-layout">
+    <!-- 侧边栏(仅控制台显示) -->
+    <aside id="app-sidebar" class="app-sidebar" style="display:none">
+      <div class="sidebar-user">
+        <div class="sidebar-avatar" id="sidebar-avatar"></div>
+        <div class="sidebar-user-info">
+          <div class="sidebar-user-name" id="sidebar-username">用户</div>
+          <div class="sidebar-user-email" id="sidebar-useremail">-</div>
+        </div>
+      </div>
+      <nav class="sidebar-nav" id="sidebar-nav">
+        <a href="#/console" data-route="/console" class="nav-item">
+          <span class="nav-icon" id="ico-overview"></span>
+          <span>概览</span>
+        </a>
+        <a href="#/console/keys" data-route="/console/keys" class="nav-item">
+          <span class="nav-icon" id="ico-keys"></span>
+          <span>密钥管理</span>
+        </a>
+        <a href="#/console/chat" data-route="/console/chat" class="nav-item">
+          <span class="nav-icon" id="ico-chat"></span>
+          <span>AI对话</span>
+        </a>
+        <a href="#/console/models" data-route="/console/models" class="nav-item">
+          <span class="nav-icon" id="ico-models"></span>
+          <span>模型列表</span>
+        </a>
+        <a href="#/console/stats" data-route="/console/stats" class="nav-item">
+          <span class="nav-icon" id="ico-stats"></span>
+          <span>统计面板</span>
+        </a>
+        <a href="#/console/logs" data-route="/console/logs" class="nav-item">
+          <span class="nav-icon" id="ico-logs"></span>
+          <span>请求日志</span>
+        </a>
+        <a href="#/console/feedback" data-route="/console/feedback" class="nav-item">
+          <span class="nav-icon" id="ico-feedback"></span>
+          <span>问题反馈</span>
+        </a>
+        <a href="#/console/model-status" data-route="/console/model-status" class="nav-item">
+          <span class="nav-icon" id="ico-model-status"></span>
+          <span>模型状态</span>
+        </a>
+        <a href="#/console/docs" data-route="/console/docs" class="nav-item">
+          <span class="nav-icon" id="ico-docs"></span>
+          <span>API文档</span>
+        </a>
+        <a href="#/console/settings" data-route="/console/settings" class="nav-item">
+          <span class="nav-icon" id="ico-settings"></span>
+          <span>设置</span>
+        </a>
+        <a href="#/sponsor" data-route="/sponsor" class="nav-item" style="color:var(--accent-warning)">
+          <span class="nav-icon" style="font-size:16px">💝</span>
+          <span style="font-weight:600">赞助支持</span>
+        </a>
+      </nav>
+      <div class="sidebar-footer">
+        <a href="#/sponsor" style="display:flex;align-items:center;gap:8px;color:var(--accent-warning);font-size:13px;padding:8px 12px;border-radius:6px;text-decoration:none;margin-bottom:4px;background:rgba(255,171,0,0.08)" onmouseover="this.style.background='rgba(255,171,0,0.15)'" onmouseout="this.style.background='rgba(255,171,0,0.08)'">
+          <span style="font-size:16px">💝</span>
+          <span>赞助支持</span>
+        </a>
+        <a href="https://qm.qq.com/q/jGnpIQWY5c" target="_blank" rel="noopener noreferrer" class="nav-item" style="display:flex;align-items:center;gap:8px;text-decoration:none;color:var(--text-secondary);font-size:13px;padding:8px 12px;border-radius:6px;transition:background .15s" onclick="event.preventDefault();Router.go('/qq-groups')">
+          <span class="nav-icon" id="ico-qq"></span>
+          <span>QQ交流群(三群)</span>
+        </a>
+        <button class="nav-item" onclick="Auth.logout()" style="width:100%;background:none;border:none;cursor:pointer;text-align:left;font-family:inherit;font-size:13px;color:var(--text-secondary)">
+          <span class="nav-icon" id="ico-logout"></span>
+          <span>退出登录</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- 移动端侧边栏遮罩层 -->
+    <div id="sidebar-overlay" class="sidebar-overlay" onclick="closeMobileSidebar()"></div>
+
+    <!-- 内容区域 -->
+    <main id="content-area" class="content-area"></main>
+    
+    <!-- 浮动入群按钮（3秒内可见） -->
+    <a href="#/qq-groups" id="floating-qq-btn" title="加入QQ交流群（二群：957919628 / 一群已满员：1038910590）" style="position:fixed;bottom:24px;right:24px;z-index:9999;background:linear-gradient(135deg,#12b7f5,#0d96d6);color:#fff;width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:22px;box-shadow:0 4px 16px rgba(18,183,245,0.4);text-decoration:none;transition:all .25s;cursor:pointer;animation:float-pulse 2.5s ease-in-out infinite">
+      <style>@keyframes float-pulse{0%,100%{transform:scale(1);box-shadow:0 4px 16px rgba(18,183,245,0.4)}50%{transform:scale(1.08);box-shadow:0 6px 24px rgba(18,183,245,0.55)}}</style>
+      💬
+    </a>
+    <script>
+    // 浮动按钮悬停效果
+    document.addEventListener('DOMContentLoaded', function() {
+      var btn = document.getElementById('floating-qq-btn');
+      if (btn) {
+        btn.addEventListener('mouseenter', function() { this.style.transform='scale(1.15)'; });
+        btn.addEventListener('mouseleave', function() { this.style.transform=''; });
+      }
+    });
+    </script>
+  </div>
+
+  <script src="/static/js/platform.js?v=8.2"></script>
+  <script>
+  /* ========== 页面渲染函数 ========== */
+
+  // 渲染顶部导航图标
+  function renderNavbarIcons() {
+    document.getElementById('brand-logo-icon').innerHTML = Icons.logo(24);
+    const auth = Auth.getUser();
+    const authArea = document.getElementById('auth-area');
+    if (auth) {
+      authArea.innerHTML = `
+        <a href="#/console" class="btn primary sm">控制台</a>
+      `;
+    } else {
+      authArea.innerHTML = `
+        <a href="#/login" class="btn ghost sm">登录</a>
+        <a href="#/register" class="btn primary sm">注册</a>
+      `;
+    }
+  }
+
+  // 渲染侧边栏图标
+  function renderSidebarIcons() {
+    document.getElementById('ico-overview').innerHTML = Icons.overview(18);
+    document.getElementById('ico-keys').innerHTML = Icons.key(18);
+    document.getElementById('ico-chat').innerHTML = Icons.chat(18);
+    document.getElementById('ico-models').innerHTML = Icons.models(18);
+    document.getElementById('ico-stats').innerHTML = Icons.stats(18);
+    document.getElementById('ico-logs').innerHTML = Icons.terminal(18);
+    document.getElementById('ico-feedback').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+    document.getElementById('ico-model-status').innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22,12 18,12 15,21 9,3 6,12 2,12"/></svg>';
+    document.getElementById('ico-docs').innerHTML = Icons.docs(18);
+    document.getElementById('ico-settings').innerHTML = Icons.settings(18);
+    document.getElementById('ico-logout').innerHTML = Icons.logout(18);
+    const icoQq = document.getElementById('ico-qq');
+    if (icoQq) icoQq.innerHTML = Icons.globe(18);
+  }
+
+  // 更新用户信息
+  function updateUserInfo() {
+    const user = Auth.getUser();
+    if (user) {
+      document.getElementById('sidebar-username').textContent = user.display_name || user.username || '用户';
+      document.getElementById('sidebar-useremail').textContent = user.email || '-';
+      document.getElementById('sidebar-avatar').innerHTML = Icons.user(24);
+    }
+  }
+
+  // 显示/隐藏侧边栏
+  function setSidebarVisible(visible) {
+    const sidebar = document.getElementById('app-sidebar');
+    sidebar.style.display = visible ? 'flex' : 'none';
+    const layout = document.getElementById('main-layout');
+    layout.classList.toggle('with-sidebar', visible);
+    // 移动端自动收起
+    if (visible && window.innerWidth <= 768) {
+      sidebar.classList.remove('mobile-open');
+    }
+  }
+
+  // 移动端侧边栏切换
+  function toggleMobileSidebar() {
+    if (window.innerWidth > 768) return;
+    const sidebar = document.getElementById('app-sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    const isOpen = sidebar.classList.contains('mobile-open');
+    sidebar.classList.toggle('mobile-open');
+    overlay.classList.toggle('active');
+  }
+
+  function closeMobileSidebar() {
+    const sidebar = document.getElementById('app-sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    sidebar.classList.remove('mobile-open');
+    overlay.classList.remove('active');
+  }
+
+  // 高亮当前菜单
+  function highlightNav(route) {
+    document.querySelectorAll('.sidebar-nav .nav-item').forEach(item => {
+      const r = item.dataset.route;
+      if (r === route) item.classList.add('active');
+      else item.classList.remove('active');
+    });
+    document.querySelectorAll('.navbar-links a').forEach(item => {
+      const r = item.dataset.route;
+      if (r === route) item.classList.add('active');
+      else item.classList.remove('active');
+    });
+  }
+
+  /* ========== 首页 ========== */
+  async function renderHome() {
+    setSidebarVisible(false);
+    highlightNav('/');
+    const content = document.getElementById('content-area');
+    // 从API获取实时统计数据
+    const statsPromise = fetch('/api/public/stats').then(r => r.ok ? r.json() : {}).catch(() => ({}));
+    content.innerHTML = `
+      <div class="home-page">
+        <section class="hero">
+          <div class="hero-bg"></div>
+          <div class="hero-content">
+            <div class="hero-badge" id="hero-badge">免费 · 开源 · 66+ 可用模型</div>
+            <h1 class="hero-title">AQUA AI平台</h1>
+            <p class="hero-subtitle">聚合 DeepSeek、GLM、Kimi、千问、NVIDIA等主流大模型<br>OpenAI兼容接口，IDE即插即用</p>
+            <div class="hero-actions">
+              <a href="#/register" class="btn primary lg">${Icons.plus(18)} 立即开始</a>
+              <a href="#/docs" class="btn lg">${Icons.docs(18)} 查看文档</a>
+              <a href="#/qq-groups" class="btn lg" style="background:linear-gradient(135deg,#12b7f5,#0d96d6);color:#fff;border:none;box-shadow:0 2px 12px rgba(18,183,245,0.3)">💬 加入QQ交流群</a>
+            </div>
+            <div class="hero-stats">
+              <div class="hero-stat"><span class="num" id="stat-models">66+</span><span class="lbl">可用模型</span></div>
+              <div class="hero-stat"><span class="num" id="stat-keys">159</span><span class="lbl">上游密钥</span></div>
+              <div class="hero-stat"><span class="num" id="stat-algos">17</span><span class="lbl">调度算法</span></div>
+              <div class="hero-stat"><span class="num">OpenAI</span><span class="lbl">兼容协议</span></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="features">
+          <div class="section-header">
+            <h2>核心能力</h2>
+            <p>面向开发者的免费AI基础设施</p>
+          </div>
+          <div class="grid grid-3">
+            <div class="feature-card">
+              <div class="feature-icon accent">${Icons.bolt(28)}</div>
+              <h3>高速推理</h3>
+              <p>17算法互锁调度系统，159个NVIDIA NIM密钥智能轮换，50+实测可用模型，避免429限流，毫秒级响应</p>
+            </div>
+            <div class="feature-card">
+              <div class="feature-icon success">${Icons.cpu(28)}</div>
+              <h3>多模型支持</h3>
+              <p>66+实测可用模型，覆盖推理、视觉、对话、安全等场景，按厂商分组展示</p>
+            </div>
+            <div class="feature-card">
+              <div class="feature-icon info">${Icons.shield(28)}</div>
+              <h3>稳定可靠</h3>
+              <p>分桶滑动窗口计数、自适应冷却、软繁忙标记，保障高并发下持续可用</p>
+            </div>
+            <div class="feature-card">
+              <div class="feature-icon warning">${Icons.brain(28)}</div>
+              <h3>推理过程</h3>
+              <p>支持DeepSeek-R1、GLM等推理模型，流式展示推理过程，可折叠展开</p>
+            </div>
+            <div class="feature-card">
+              <div class="feature-icon info">${Icons.globe(28)}</div>
+              <h3>联网搜索</h3>
+              <p>内置三级回退搜索引擎（DuckDuckGo/Bing），让AI获取实时互联网信息</p>
+            </div>
+            <div class="feature-card">
+              <div class="feature-icon accent">${Icons.terminal(28)}</div>
+              <h3>IDE兼容</h3>
+              <p>OpenAI SDK兼容，直接对接 CC Switch、Cursor、Copilot 等开发工具</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="cta">
+          <div class="cta-card">
+            <h2>立即开始你的AI之旅</h2>
+            <p>免费注册，即刻获得5个API密钥，每密钥无配额限制，畅享66+实测可用模型</p>
+            <a href="#/register" class="btn primary lg">${Icons.arrowRight(18)} 立即注册</a>
+          </div>
+        </section>
+
+        <footer class="footer">
+          <div class="footer-inner">
+            <div class="footer-brand">
+              <span>${Icons.logo(20)}</span>
+              <span>AQUA AI平台</span>
+            </div>
+            <div class="footer-links">
+              <a href="#/models">模型列表</a>
+              <a href="#/docs">API文档</a>
+              <a href="#/sponsor">赞助</a>
+              <a href="#/legal/disclaimer">免责协议</a>
+              <a href="#/login">登录</a>
+              <a href="#/register">注册</a>
+              <a href="#/qq-groups" data-route="/qq-groups">QQ群</a>
+            </div>
+            <div class="footer-copy">© 2026 AQUA Platform v10.0 · 开源项目</div>
+          </div>
+        </footer>
+      </div>
+    `;
+    // 异步更新统计数据
+    statsPromise.then(data => {
+      if (data.models) {
+        const badge = document.getElementById('hero-badge');
+        const statEl = document.getElementById('stat-models');
+        if (badge) badge.textContent = `免费 · 开源 · ${data.models}+ 可用模型`;
+        if (statEl) statEl.textContent = data.models + '+';
+      }
+      if (data.upstream_keys) {
+        const el = document.getElementById('stat-keys');
+        if (el) el.textContent = String(data.upstream_keys);
+      }
+      if (data.algorithms) {
+        const el = document.getElementById('stat-algos');
+        if (el) el.textContent = String(data.algorithms);
+      }
+    }).catch(() => {});
+  }
+
+  /* ========== 登录页 ========== */
+  async function renderLogin() {
+    setSidebarVisible(false);
+    highlightNav('');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="auth-page">
+        <div class="auth-card">
+          <div class="auth-header">
+            <div class="auth-logo">${Icons.logo(40)}</div>
+            <h1>欢迎回来</h1>
+            <p>登录到 AQUA AI平台</p>
+          </div>
+          <form id="login-form" class="auth-form">
+            <div class="form-group">
+              <label class="form-label">用户名 / 邮箱</label>
+              <input type="text" name="username" class="input" placeholder="输入用户名或邮箱" required autocomplete="username">
+            </div>
+            <div class="form-group">
+              <label class="form-label">密码</label>
+              <div class="input-wrap">
+                <input type="password" name="password" id="login-password" class="input" placeholder="输入密码" required autocomplete="current-password">
+                <button type="button" class="input-suffix" data-toggle="login-password">${Icons.eye(16)}</button>
+              </div>
+            </div>
+            <button type="submit" class="btn primary block">${Icons.arrowRight(18)} 登录</button>
+          </form>
+          <div class="auth-footer">
+            <a href="#/reset-password">忘记密码？</a>
+            <span>·</span>
+            <a href="#/register">没有账号？立即注册</a>
+            <span>·</span>
+            <a href="#/qq-groups" style="color:#12b7f5">💬 加入交流群</a>
+          </div>
+        </div>
+      </div>
+    `;
+    // 绑定表单
+    document.getElementById('login-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const btn = form.querySelector('button[type=submit]');
+      const data = new FormData(form);
+      const payload = { username: data.get('username'), password: data.get('password') };
+      btn.disabled = true;
+      btn.innerHTML = Icons.spinner(18) + ' 登录中...';
+      try {
+        await API.post('/api/auth/login', payload);
+        Toast.success('登录成功');
+        await Auth.fetchUser();
+        // 检查免责协议确认状态
+        if (!localStorage.getItem('disclaimer_ack_20260722')) {
+          showDisclaimerNotice();
+        }
+        Router.go('/console');
+      } catch (err) {
+        Toast.error(err.message);
+        btn.disabled = false;
+        btn.innerHTML = Icons.arrowRight(18) + ' 登录';
+      }
+    };
+    bindPasswordToggle();
+  }
+
+  /* ========== 注册页 ========== */
+  async function renderRegister() {
+    setSidebarVisible(false);
+    highlightNav('');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="auth-page">
+        <div class="auth-card">
+          <div class="auth-header">
+            <div class="auth-logo">${Icons.logo(40)}</div>
+            <h1>创建账号</h1>
+            <p>注册即可免费使用66+实测可用模型</p>
+          </div>
+          <form id="register-form" class="auth-form">
+            <div class="form-group">
+              <label class="form-label">用户名</label>
+              <input type="text" name="username" class="input" placeholder="设置用户名" required minlength="3" maxlength="32" autocomplete="username">
+            </div>
+            <div class="form-group">
+              <label class="form-label">邮箱</label>
+              <input type="email" name="email" class="input" placeholder="输入邮箱地址" required autocomplete="email">
+            </div>
+            <div class="form-group">
+              <label class="form-label">验证码</label>
+              <div class="input-group">
+                <input type="text" name="code" class="input" placeholder="输入6位验证码" required maxlength="6" autocomplete="one-time-code">
+                <button type="button" class="btn" id="send-code-btn">发送验证码</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">密码</label>
+              <div class="input-wrap">
+                <input type="password" name="password" id="register-password" class="input" placeholder="设置密码" required minlength="8" autocomplete="new-password">
+                <button type="button" class="input-suffix" data-toggle="register-password">${Icons.eye(16)}</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;font-size:13px;color:var(--text-secondary);font-weight:normal">
+                <input type="checkbox" id="agree-disclaimer" style="margin-top:2px;width:16px;height:16px;accent-color:var(--accent-primary)" required>
+                <span>我已阅读并同意 <a href="#/legal/disclaimer" target="_blank" style="color:var(--accent-primary);text-decoration:underline">《AQUA平台免责协议》</a></span>
+              </label>
+            </div>
+            <button type="submit" class="btn primary block">${Icons.arrowRight(18)} 注册</button>
+          </form>
+          <div class="auth-footer">
+            <a href="#/login">已有账号？返回登录</a>
+            <span>·</span>
+            <a href="#/qq-groups" style="color:#12b7f5">💬 加入交流群</a>
+          </div>
+        </div>
+      </div>
+    `;
+    // 发送验证码
+    let countdown = 0;
+    const sendBtn = document.getElementById('send-code-btn');
+    sendBtn.onclick = async () => {
+      const email = document.querySelector('input[name=email]').value.trim();
+      if (!email) { Toast.warn('请先填写邮箱'); return; }
+      if (countdown > 0) return;
+      sendBtn.disabled = true;
+      sendBtn.textContent = '发送中...';
+      try {
+        await API.post('/api/auth/send-code', { email, purpose: 'register' });
+        Toast.success('验证码已发送至邮箱');
+        countdown = 60;
+        const timer = setInterval(() => {
+          countdown--;
+          sendBtn.textContent = countdown + 's';
+          if (countdown <= 0) {
+            clearInterval(timer);
+            sendBtn.disabled = false;
+            sendBtn.textContent = '发送验证码';
+          }
+        }, 1000);
+      } catch (err) {
+        Toast.error(err.message);
+        sendBtn.disabled = false;
+        sendBtn.textContent = '发送验证码';
+      }
+    };
+    // 行为检测：收集用户交互数据（替代人机验证）
+    (function() {
+      const bd = { mouse_moves: 0, clicks: 0, scrolls: 0, keyboard_events: 0,
+                   touch_events: 0, page_visibility: 0, viewport_width: window.innerWidth,
+                   viewport_height: window.innerHeight, time_on_page_ms: 0 };
+      const start = Date.now();
+      let mmTimer;
+      document.addEventListener('mousemove', () => { bd.mouse_moves++; }, { passive: true });
+      document.addEventListener('click', () => { bd.clicks++; }, { passive: true });
+      document.addEventListener('scroll', () => { bd.scrolls++; }, { passive: true });
+      document.addEventListener('keydown', () => { bd.keyboard_events++; }, { passive: true });
+      document.addEventListener('touchstart', () => { bd.touch_events++; }, { passive: true });
+      document.addEventListener('visibilitychange', () => { bd.page_visibility++; });
+      window._behaviorData = bd;
+      // 在表单提交前填充停留时间
+      const origSubmit = document.getElementById('register-form').onsubmit;
+      document.getElementById('register-form').onsubmit = function(e) {
+        bd.time_on_page_ms = Date.now() - start;
+        return origSubmit.call(this, e);
+      };
+    })();
+    // 注册提交
+    document.getElementById('register-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const agreeCheck = document.getElementById('agree-disclaimer');
+      if (agreeCheck && !agreeCheck.checked) {
+        Toast.warn('请先阅读并同意免责协议');
+        return;
+      }
+      const form = e.target;
+      const btn = form.querySelector('button[type=submit]');
+      const data = new FormData(form);
+      const payload = {
+        username: data.get('username'),
+        email: data.get('email'),
+        code: data.get('code'),
+        password: data.get('password'),
+        behavior: window._behaviorData || {},
+      };
+      btn.disabled = true;
+      btn.innerHTML = Icons.spinner(18) + ' 注册中...';
+      try {
+        await API.post('/api/auth/register', payload);
+        Toast.success('注册成功，已自动登录');
+        await Auth.fetchUser();
+        Router.go('/console');
+      } catch (err) {
+        Toast.error(err.message);
+        btn.disabled = false;
+        btn.innerHTML = Icons.arrowRight(18) + ' 注册';
+      }
+    };
+    bindPasswordToggle();
+  }
+
+  /* ========== 密码重置页 ========== */
+  async function renderResetPassword() {
+    setSidebarVisible(false);
+    highlightNav('');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="auth-page">
+        <div class="auth-card">
+          <div class="auth-header">
+            <div class="auth-logo">${Icons.logo(40)}</div>
+            <h1>重置密码</h1>
+            <p>输入邮箱获取验证码以重置密码</p>
+          </div>
+          <form id="reset-form" class="auth-form">
+            <div class="form-group">
+              <label class="form-label">邮箱</label>
+              <input type="email" name="email" class="input" placeholder="注册时使用的邮箱" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">验证码</label>
+              <div class="input-group">
+                <input type="text" name="code" class="input" placeholder="6位验证码" required maxlength="6">
+                <button type="button" class="btn" id="reset-send-code">发送验证码</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">新密码</label>
+              <input type="password" name="new_password" class="input" placeholder="设置新密码" required minlength="8">
+            </div>
+            <button type="submit" class="btn primary block">${Icons.check(18)} 重置密码</button>
+          </form>
+          <div class="auth-footer">
+            <a href="#/login">返回登录</a>
+            <span>·</span>
+            <a href="#/qq-groups" style="color:#12b7f5">💬 加入交流群</a>
+          </div>
+        </div>
+      </div>
+    `;
+    let countdown = 0;
+    const sendBtn = document.getElementById('reset-send-code');
+    sendBtn.onclick = async () => {
+      const email = document.querySelector('input[name=email]').value.trim();
+      if (!email) { Toast.warn('请先填写邮箱'); return; }
+      if (countdown > 0) return;
+      sendBtn.disabled = true;
+      sendBtn.textContent = '发送中...';
+      try {
+        await API.post('/api/auth/send-code', { email, purpose: 'reset_password' });
+        Toast.success('验证码已发送');
+        countdown = 60;
+        const timer = setInterval(() => {
+          countdown--;
+          sendBtn.textContent = countdown + 's';
+          if (countdown <= 0) {
+            clearInterval(timer);
+            sendBtn.disabled = false;
+            sendBtn.textContent = '发送验证码';
+          }
+        }, 1000);
+      } catch (err) {
+        Toast.error(err.message);
+        sendBtn.disabled = false;
+        sendBtn.textContent = '发送验证码';
+      }
+    };
+    document.getElementById('reset-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const btn = form.querySelector('button[type=submit]');
+      const data = new FormData(form);
+      const payload = {
+        email: data.get('email'),
+        code: data.get('code'),
+        new_password: data.get('new_password'),
+      };
+      btn.disabled = true;
+      btn.innerHTML = Icons.spinner(18) + ' 处理中...';
+      try {
+        await API.post('/api/auth/reset-password', payload);
+        Toast.success('密码已重置，请使用新密码登录');
+        Router.go('/login');
+      } catch (err) {
+        Toast.error(err.message);
+        btn.disabled = false;
+        btn.innerHTML = Icons.check(18) + ' 重置密码';
+      }
+    };
+  }
+
+  /* ========== 概览页 ========== */
+  let _overviewTimer = null;
+  async function renderOverview() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console');
+    // 清除旧的定时器
+    if (_overviewTimer) { clearInterval(_overviewTimer); _overviewTimer = null; }
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">概览</h1>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="muted" id="overview-last-refresh" style="font-size:12px"></span>
+            <button class="btn sm" onclick="renderOverview()">${Icons.refresh(14)} 刷新</button>
+          </div>
+        </div>
+        <div id="qq-group-banner" style="background:linear-gradient(135deg,rgba(0,212,255,0.15),rgba(0,153,204,0.08));border:2px solid rgba(0,212,255,0.35);border-radius:12px;padding:14px 24px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:12px">
+            <span style="font-size:28px;line-height:1">💬</span>
+            <div>
+              <div style="font-weight:700;font-size:15px;color:var(--text-primary)">加入 AQUA 交流群，获取技术支持与最新动态</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:2px">一群已满 · 二群已满 · 推荐三群：<span style="font-weight:600;color:#00d4ff;letter-spacing:0.5px">1073851223</span></div>
+            </div>
+          </div>
+          <a href="https://qm.qq.com/q/jGnpIQWY5c" target="_blank" rel="noopener noreferrer" style="background:linear-gradient(135deg,#00d4ff,#0099cc);color:#fff;border:none;padding:8px 20px;border-radius:8px;font-size:14px;font-weight:600;white-space:nowrap;flex-shrink:0;text-decoration:none;box-shadow:0 2px 12px rgba(0,212,255,0.35);transition:all .2s;cursor:pointer" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 20px rgba(0,212,255,0.45)'" onmouseout="this.style.transform='';this.style.boxShadow='0 2px 12px rgba(0,212,255,0.35)'">加入三群 →</a>
+        </div>
+        <!-- 服务声明通知横幅 -->
+        <div style="background:linear-gradient(135deg,rgba(255,171,0,0.12),rgba(255,140,0,0.06));border:1px solid rgba(255,171,0,0.3);border-radius:12px;padding:12px 20px;margin-bottom:16px;display:flex;align-items:flex-start;gap:10px;font-size:13px;line-height:1.7">
+          <span style="font-size:18px;flex-shrink:0;line-height:1.4">\u26A0\uFE0F</span>
+          <div style="color:var(--text-warning)">
+            <strong style="font-size:14px">服务声明：</strong>
+            本平台为<strong>完全免费</strong>的开源AI服务，不作出任何服务等级保证，不保证服务稳定性、可用性或响应速度。
+            请合理使用平台资源，避免滥用行为。对于违反相关规定的用户，平台有权限制或终止服务。
+            同意<a href="#/legal/disclaimer" style="color:var(--accent-primary);text-decoration:underline" target="_blank">《AQUA 平台免责协议》</a>后继续使用。
+          </div>
+        </div>
+        <div id="overview-stats" class="grid grid-5"></div>
+        <div class="grid grid-2" style="margin-top:16px">
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">近7天请求趋势</h3>
+            </div>
+            <div id="overview-trend" style="height:240px"></div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <h3 class="card-title">状态码分布</h3>
+            </div>
+            <div id="overview-status"></div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3 class="card-title">最近请求</h3>
+            <a href="#/console/logs" class="btn sm ghost">查看全部</a>
+          </div>
+          <div id="overview-recent"></div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3 class="card-title"><span style="color:var(--accent-warning)">\u{1F3C6}</span> 今日全平台排行榜</h3>
+            <span class="muted" id="leaderboard-summary" style="font-size:12px"></span>
+          </div>
+          <div id="leaderboard-container"></div>
+        </div>
+      </div>
+    `;
+    // 加载统计
+    Loader.show('#overview-stats', '加载统计中');
+    Loader.show('#overview-trend', '加载趋势中');
+    Loader.show('#overview-status', '加载状态中');
+    Loader.show('#overview-recent', '加载日志中');
+    Loader.show('#leaderboard-container', '加载排行榜中');
+    try {
+      const [stats, ccs, lb] = await Promise.all([
+        API.get('/api/user/stats'),
+        API.get('/api/user/concurrency-stats').catch(() => null),
+        API.get('/api/user/leaderboard?limit=20').catch(() => null),
+      ]);
+      const o = stats.overview || {};
+      // 显示最后刷新时间
+      const now = new Date();
+      const timeStr = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+      const el = document.getElementById('overview-last-refresh');
+      if (el) el.textContent = `最后更新 ${timeStr}`;
+      // 30秒自动刷新统计数据
+      if (_overviewTimer) clearInterval(_overviewTimer);
+      _overviewTimer = setInterval(async () => {
+        try {
+          const [s, ccs2] = await Promise.all([
+            API.get('/api/user/stats'),
+            API.get('/api/user/concurrency-stats').catch(() => null),
+          ]);
+          const ov = s.overview || {};
+          const statCards = document.getElementById('overview-stats');
+          if (statCards) {
+            statCards.innerHTML = `
+              <div class="stat-card accent">
+                <div class="stat-label">今日请求数</div>
+                <div class="stat-value">${Fmt.full(ov.total_requests || 0)}</div>
+                <div class="stat-trend flat">${Icons.clock(12)} 今日</div>
+              </div>
+              <div class="stat-card success">
+                <div class="stat-label">今日Token消耗</div>
+                <div class="stat-value" title="${Fmt.full(ov.total_tokens || 0)}">${Fmt.number(ov.total_tokens || 0)}</div>
+                <div class="stat-trend flat">输入 ${Fmt.number(ov.prompt_tokens || 0)} · 输出 ${Fmt.number(ov.completion_tokens || 0)}</div>
+              </div>
+              <div class="stat-card warning">
+                <div class="stat-label">今日平均延迟</div>
+                <div class="stat-value">${Fmt.latency(ov.avg_latency || 0)}</div>
+                <div class="stat-trend flat">${Icons.clock(12)} 毫秒</div>
+              </div>
+              <div class="stat-card info">
+                <div class="stat-label">并发状态</div>
+                <div class="stat-value" style="font-size:18px">${ccs2 ? ccs2.current+'/'+(ccs2.limit_label||ccs2.limit) : '...'}</div>
+                <div class="stat-trend flat">${ccs2 && ccs2.tag ? ccs2.tag : '峰值 '+(ccs2?.peak||0)}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">7天请求总数</div>
+                <div class="stat-value">${Fmt.full((s.trend_7d || []).reduce((acc, d) => acc + (d.request_count || 0), 0))}</div>
+                <div class="stat-trend flat">近7天累计</div>
+              </div>
+            `;
+          }
+          renderTrendChart('overview-trend', s.trend_7d || []);
+          const n = new Date();
+          const ts = `${n.getHours().toString().padStart(2,'0')}:${n.getMinutes().toString().padStart(2,'0')}:${n.getSeconds().toString().padStart(2,'0')}`;
+          const refreshEl = document.getElementById('overview-last-refresh');
+          if (refreshEl) refreshEl.textContent = `最后更新 ${ts}`;
+        } catch (e) { /* 静默失败 */ }
+      }, 30000);
+      const _e762 = document.getElementById("overview-stats"); if (_e762) _e762.innerHTML = `
+        <div class="stat-card accent">
+          <div class="stat-label">今日请求数</div>
+          <div class="stat-value">${Fmt.full(o.total_requests || 0)}</div>
+          <div class="stat-trend flat">${Icons.clock(12)} 今日</div>
+        </div>
+        <div class="stat-card success">
+          <div class="stat-label">今日Token消耗</div>
+          <div class="stat-value" title="${Fmt.full(o.total_tokens || 0)}">${Fmt.number(o.total_tokens || 0)}</div>
+          <div class="stat-trend flat">输入 ${Fmt.number(o.prompt_tokens || 0)} · 输出 ${Fmt.number(o.completion_tokens || 0)}</div>
+        </div>
+        <div class="stat-card warning">
+          <div class="stat-label">今日平均延迟</div>
+          <div class="stat-value">${Fmt.latency(o.avg_latency || 0)}</div>
+          <div class="stat-trend flat">${Icons.clock(12)} 毫秒</div>
+        </div>
+        <div class="stat-card info">
+          <div class="stat-label">并发状态</div>
+          <div class="stat-value" style="font-size:18px">${ccs ? ccs.current+'/'+(ccs.limit_label||ccs.limit) : '...'}</div>
+          <div class="stat-trend flat">${ccs && ccs.tag ? ccs.tag : '峰值 '+(ccs?.peak||0)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">7天请求总数</div>
+          <div class="stat-value">${Fmt.full((stats.trend_7d || []).reduce((s, d) => s + (d.request_count || 0), 0))}</div>
+          <div class="stat-trend flat">近7天累计</div>
+        </div>
+      `;
+      // 趋势图
+      renderTrendChart('overview-trend', stats.trend_7d || []);
+      // 状态码分布 - 从最近日志推断
+      const recentLogs = await API.get('/api/user/request-logs?page=1&page_size=100');
+      renderStatusDistribution('overview-status', recentLogs.data || []);
+      // 最近请求
+      renderRecentLogs('overview-recent', (recentLogs.data || []).slice(0, 10));
+      // 排行榜
+      if (lb && lb.leaderboard && lb.leaderboard.length > 0) {
+        renderLeaderboard('leaderboard-container', lb.leaderboard);
+        const summary = document.getElementById('leaderboard-summary');
+        if (summary) summary.textContent = `今日活跃 ${lb.total?.active_users || 0} 人 · 总计 ${Fmt.number(lb.total?.total_requests || 0)} 请求 · ${Fmt.full(lb.total?.total_tokens || 0)} Tokens`;
+      } else {
+        const _lb = document.getElementById('leaderboard-container'); if (_lb) _lb.innerHTML = '<div class="empty-state" style="padding:24px"><div class="muted">暂无排行数据</div></div>';
+      }
+      // 无数据时显示新手引导
+      const hasOverviewData = (o.total_requests || 0) > 0 || (recentLogs.data || []).length > 0;
+      if (!hasOverviewData) {
+        const guide = document.createElement('div');
+        guide.className = 'card';
+        guide.style.cssText = 'margin-top:16px;border-left:3px solid var(--accent-primary)';
+        guide.innerHTML = `<div style="padding:16px;display:flex;align-items:center;gap:12px">
+          ${Icons.bolt(20)}
+          <div>
+            <div style="font-weight:600;margin-bottom:4px">欢迎使用 AQUA AI平台</div>
+            <div class="muted">当前还没有请求记录。前往 <a href="#/console/chat" style="color:var(--accent-primary)">AI对话</a> 体验，或在 <a href="#/console/keys" style="color:var(--accent-primary)">密钥管理</a> 创建API密钥接入你的应用。</div>
+          </div>
+        </div>`;
+        document.getElementById('overview-recent').parentElement.appendChild(guide);
+      }
+    } catch (err) {
+      Toast.error('加载概览失败：' + err.message);
+      const _ov2 = document.getElementById('overview-stats'); if (_ov2) _ov2.innerHTML = emptyState('加载失败，请刷新重试', 'error');
+    }
+  }
+
+  /* ========== 密钥管理页 ========== */
+  let keysState = { data: [], sort: { field: 'created_at', order: 'desc' } };
+  async function renderKeys() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/keys');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">密钥管理</h1>
+          <button class="btn primary" onclick="showCreateKeyModal()">${Icons.plus(16)} 创建密钥</button>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">API密钥列表</h3>
+            <span class="muted" id="keys-count">-</span>
+          </div>
+          <div id="keys-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">API地址</h3>
+          </div>
+          <div class="api-url-section">
+            <div class="form-group">
+              <label class="form-label">Base URL（OpenAI SDK 使用）</label>
+              <div class="input-group">
+                <input type="text" class="input" id="base-url" readonly value="https://your-domain.com/v1">
+                <button class="btn" onclick="copyToClipboard('https://your-domain.com/v1')">${Icons.copy(14)} 复制</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">完整端点 URL</label>
+              <div class="input-group">
+                <input type="text" class="input" readonly value="https://your-domain.com/v1/chat/completions">
+                <button class="btn" onclick="copyToClipboard('https://your-domain.com/v1/chat/completions')">${Icons.copy(14)} 复制</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    await loadKeys();
+  }
+
+  async function loadKeys() {
+    const container = document.getElementById('keys-list');
+    Loader.show(container, '加载密钥中');
+    try {
+      const keys = await API.get('/api/user/keys');
+      keysState.data = keys || [];
+      document.getElementById('keys-count').textContent = `${keys.length} / 5`;
+      renderKeysList();
+    } catch (err) {
+      container.innerHTML = emptyState('加载密钥失败：' + err.message, 'error');
+    }
+  }
+
+  // 密钥可见性状态: { keyId: { revealed: bool, fullKey: string } }
+  const _keyVisibility = {};
+
+  function renderKeysList() {
+    const container = document.getElementById('keys-list');
+    const keys = applySort(keysState.data, keysState.sort.field, keysState.sort.order);
+    if (!keys.length) {
+      container.innerHTML = emptyState('暂无API密钥，点击右上角创建', 'key');
+      return;
+    }
+    container.innerHTML = `
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th data-sort="key_prefix">密钥</th>
+              <th data-sort="label">备注</th>
+              <th data-sort="status">状态</th>
+              <th data-sort="created_at">创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${keys.map(k => {
+              const vis = _keyVisibility[k.id] || { revealed: false, fullKey: '' };
+              const displayKey = vis.revealed && vis.fullKey
+                ? vis.fullKey
+                : (k.key_prefix || '-') + (k.key_prefix && k.key_prefix.length <= 8 ? '...' : '');
+              const isActive = k.status === 'active';
+              return `
+              <tr>
+                <td>
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <code class="key-prefix" id="key-display-${escapeAttr(k.id)}" style="font-size:12px;word-break:break-all">${escapeHtml(displayKey)}</code>
+                    <button class="btn xs" title="${vis.revealed ? '隐藏密钥' : '显示密钥'}" onclick="toggleKeyVisibility('${escapeAttr(k.id)}')">
+                      ${vis.revealed ? Icons.eyeOff(12) : Icons.eye(12)}
+                    </button>
+                    <button class="btn xs" title="复制密钥" onclick="copyFullKey('${escapeAttr(k.id)}')">
+                      ${Icons.copy(12)}
+                    </button>
+                  </div>
+                </td>
+                <td>${escapeHtml(k.label || '未命名')}</td>
+                <td><span class="tag ${isActive ? 'active' : ''}"><span class="status-dot ${isActive ? 'active' : ''}"></span>${isActive ? 'active' : escapeHtml(k.status)}</span></td>
+                <td class="muted">${Fmt.time(k.created_at)}</td>
+                <td>
+                  <div class="btn-group">
+                    <button class="btn xs ${isActive ? '' : 'primary'}" title="${isActive ? '停用密钥' : '启用密钥'}" onclick="toggleKeyStatus('${escapeAttr(k.id)}')">
+                      ${isActive ? Icons.stop(12) : Icons.check(12)} ${isActive ? '停用' : '启用'}
+                    </button>
+                    <button class="btn xs" title="复制Base URL" onclick="copyToClipboard('https://your-domain.com/v1')">${Icons.copy(12)} Base</button>
+                    <button class="btn xs" title="复制完整URL" onclick="copyToClipboard('https://your-domain.com/v1/chat/completions')">${Icons.copy(12)} Full</button>
+                    <button class="btn xs danger" onclick="deleteKey('${escapeAttr(k.id)}')">${Icons.trash(12)} 删除</button>
+                  </div>
+                </td>
+              </tr>
+            `}).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+    // 绑定排序
+    container.querySelectorAll('th[data-sort]').forEach(th => {
+      th.onclick = () => {
+        const field = th.dataset.sort;
+        if (keysState.sort.field === field) {
+          keysState.sort.order = keysState.sort.order === 'asc' ? 'desc' : 'asc';
+        } else {
+          keysState.sort = { field, order: 'asc' };
+        }
+        renderKeysList();
+      };
+    });
+  }
+
+  async function toggleKeyVisibility(keyId) {
+    const vis = _keyVisibility[keyId] || { revealed: false, fullKey: '' };
+    if (vis.revealed) {
+      // 隐藏
+      vis.revealed = false;
+      _keyVisibility[keyId] = vis;
+      renderKeysList();
+      return;
+    }
+    // 显示 - 需要从后端获取完整密钥
+    if (vis.fullKey) {
+      vis.revealed = true;
+      _keyVisibility[keyId] = vis;
+      renderKeysList();
+      return;
+    }
+    // 首次显示，调用后端解密接口
+    try {
+      const result = await API.get('/api/user/keys/' + keyId + '/reveal');
+      _keyVisibility[keyId] = { revealed: true, fullKey: result.key };
+      renderKeysList();
+      Toast.success('密钥已显示');
+    } catch (err) {
+      Toast.error('获取密钥失败：' + err.message);
+    }
+  }
+
+  async function copyFullKey(keyId) {
+    const vis = _keyVisibility[keyId] || { revealed: false, fullKey: '' };
+    let keyToCopy = vis.fullKey;
+    if (!keyToCopy) {
+      // 尚未获取过完整密钥，先调用接口获取
+      try {
+        const result = await API.get('/api/user/keys/' + keyId + '/reveal');
+        keyToCopy = result.key;
+        _keyVisibility[keyId] = { revealed: vis.revealed, fullKey: keyToCopy };
+      } catch (err) {
+        Toast.error('获取密钥失败：' + err.message);
+        return;
+      }
+    }
+    try {
+      await navigator.clipboard.writeText(keyToCopy);
+      Toast.success('密钥已复制到剪贴板');
+    } catch (_) {
+      // fallback
+      const ta = document.createElement('textarea');
+      ta.value = keyToCopy;
+      ta.style.cssText = 'position:fixed;left:-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      Toast.success('密钥已复制到剪贴板');
+    }
+  }
+
+  async function toggleKeyStatus(keyId) {
+    try {
+      const result = await API.put('/api/user/keys/' + keyId + '/toggle', {});
+      Toast.success(result.message || '状态已切换');
+      await loadKeys();
+    } catch (err) {
+      Toast.error(err.message);
+    }
+  }
+
+  async function showCreateKeyModal() {
+    const keys = keysState.data.filter(k => k.status === 'active');
+    if (keys.length >= 5) {
+      Toast.warn('已达密钥上限(5个)，请先删除不需要的密钥');
+      return;
+    }
+    Modal.show({
+      title: '创建API密钥',
+      body: `
+        <div class="form-group">
+          <label class="form-label">备注（可选）</label>
+          <input type="text" id="key-label" class="input" placeholder="例如：开发环境">
+        </div>
+      `,
+      footer: `
+        <button class="btn" onclick="closeModal()">取消</button>
+        <button class="btn primary" id="create-key-confirm">${Icons.plus(14)} 创建</button>
+      `,
+      onShow: (body, footer) => {
+        footer.querySelector('#create-key-confirm').onclick = async () => {
+          const label = body.querySelector('#key-label').value.trim();
+          const btn = footer.querySelector('#create-key-confirm');
+          btn.disabled = true;
+          btn.innerHTML = Icons.spinner(14) + ' 创建中...';
+          try {
+            const result = await API.post('/api/user/keys', { label });
+            Modal.close();
+            // 显示密钥展示模态框
+            Modal.show({
+              title: '密钥创建成功',
+              body: `
+                <div class="key-created-info">
+                  <div class="alert alert-warning">
+                    ${Icons.warn(16)}
+                    <span>请立即保存密钥，关闭后将无法再次查看完整内容</span>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">完整API密钥</label>
+                    <div class="input-group">
+                      <input type="text" class="input" id="new-key-value" readonly value="${escapeAttr(result.key)}">
+                      <button class="btn" onclick="copyToClipboard('${escapeAttr(result.key)}')">${Icons.copy(14)} 复制</button>
+                    </div>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">密钥前缀</label>
+                    <input type="text" class="input" readonly value="${escapeAttr(result.key_prefix)}">
+                  </div>
+                </div>
+                <div class="card-subtitle" style="margin-top:12px">API地址（点击复制）</div>
+                <div class="api-urls">
+                  <div class="api-url-row">
+                    <span class="api-url-label">Base URL:</span>
+                    <code>https://your-domain.com/v1</code>
+                    <button class="btn xs" onclick="copyToClipboard('https://your-domain.com/v1')">${Icons.copy(12)}</button>
+                  </div>
+                  <div class="api-url-row">
+                    <span class="api-url-label">完整端点:</span>
+                    <code>https://your-domain.com/v1/chat/completions</code>
+                    <button class="btn xs" onclick="copyToClipboard('https://your-domain.com/v1/chat/completions')">${Icons.copy(12)}</button>
+                  </div>
+                </div>
+              `,
+              footer: `<button class="btn primary" onclick="closeModal()">${Icons.check(14)} 我已保存</button>`,
+            });
+            await loadKeys();
+            Toast.success('密钥创建成功');
+          } catch (err) {
+            Toast.error(err.message);
+            btn.disabled = false;
+            btn.innerHTML = Icons.plus(14) + ' 创建';
+          }
+        };
+      },
+    });
+  }
+
+  async function deleteKey(keyId) {
+    const ok = await Modal.confirm({
+      title: '删除密钥',
+      body: '<p>确定要删除此API密钥吗？删除后使用该密钥的请求将失败。</p>',
+      danger: true,
+      okText: '确认删除',
+    });
+    if (!ok) return;
+    try {
+      await API.delete('/api/user/keys/' + keyId);
+      Toast.success('密钥已删除');
+      await loadKeys();
+    } catch (err) {
+      Toast.error(err.message);
+    }
+  }
+
+  /* ========== AI 对话页 ========== */
+  let chatState = {
+    history: [],
+    currentHistoryId: null,
+    messages: [],
+    model: 'deepseek-ai/deepseek-v4-flash',
+    models: [],
+    streaming: false,
+    abortController: null,
+    webSearch: false,
+    showReasoning: true,
+  };
+
+  async function renderChat() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/chat');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="chat-page">
+        <div class="chat-sidebar">
+          <div class="chat-sidebar-header">
+            <h3>对话历史</h3>
+            <button class="btn primary sm" onclick="newChat()">${Icons.plus(14)} 新建</button>
+          </div>
+          <div class="chat-history-list" id="chat-history-list">
+            <div class="loader"><div class="loader-spinner">${Icons.spinner(28)}</div><div class="loader-text">加载中</div></div>
+          </div>
+        </div>
+        <div class="chat-main">
+          <div class="chat-header">
+            <div class="chat-model-select">
+              <label>模型</label>
+              <select id="chat-model" class="select"></select>
+            </div>
+            <div class="chat-actions">
+              <button class="btn sm ${chatState.webSearch ? 'primary' : ''}" id="web-search-btn" onclick="toggleWebSearch()">
+                ${Icons.globe(14)} 联网 ${chatState.webSearch ? '开' : '关'}
+              </button>
+              <button class="btn sm ${chatState.showReasoning ? 'primary' : ''}" id="reasoning-btn" onclick="toggleReasoning()">
+                ${Icons.brain(14)} 推理 ${chatState.showReasoning ? '开' : '关'}
+              </button>
+            </div>
+          </div>
+          <div class="chat-messages" id="chat-messages">
+            <div class="chat-empty">
+              <div class="chat-empty-icon">${Icons.chat(48)}</div>
+              <h3>开始新对话</h3>
+              <p>选择模型，输入消息开始与AI对话</p>
+            </div>
+          </div>
+          <div class="chat-input-area">
+            <div class="chat-input-wrap">
+              <textarea id="chat-input" class="chat-input" placeholder="输入消息... (Enter发送 / Ctrl+Enter换行)" rows="1"></textarea>
+              <button class="btn primary" id="chat-send" onclick="sendMessage()">${Icons.send(16)} 发送</button>
+              <button class="btn danger" id="chat-stop" onclick="stopGeneration()" style="display:none">${Icons.stop(16)} 停止</button>
+            </div>
+            <div class="chat-hints">Enter发送 | Ctrl+Enter换行 | 拖拽上传</div>
+            <div class="chat-hints" style="margin-top:4px;font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:4px;justify-content:center">
+              <span style="color:var(--accent-warning);font-size:12px">\u26A0\uFE0F</span>
+              本服务为免费开源性质，不保证稳定性与响应速度，请合理使用
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    // 加载模型列表
+    try {
+      const models = await API.get('/api/chat/models');
+      chatState.models = models || [];
+      const sel = document.getElementById('chat-model');
+      // 按能力分组渲染模型选择器
+      const chatModels = (models || []).filter(m => {
+        const caps = m.capabilities || [];
+        return !caps.includes('嵌入') && !caps.includes('安全') && !caps.includes('OCR') && !caps.includes('翻译') && !caps.includes('语音');
+      });
+      sel.innerHTML = chatModels.map(m => {
+        const caps = m.capabilities || [];
+        const capStr = caps.length ? ' [' + caps.join('/') + ']' : '';
+        const label = (m.display_name || m.id) + capStr;
+        return `<option value="${escapeAttr(m.id)}" ${m.id === chatState.model ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+      }).join('');
+      sel.onchange = () => { chatState.model = sel.value; };
+    } catch (err) {
+      Toast.error('加载模型失败：' + err.message);
+    }
+    // 加载历史
+    await loadChatHistory();
+    // 输入框自适应
+    const input = document.getElementById('chat-input');
+    input.addEventListener('input', () => {
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 200) + 'px';
+    });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.ctrlKey) {
+        e.preventDefault();
+        sendMessage();
+      }
+    });
+  }
+
+  async function loadChatHistory() {
+    const container = document.getElementById('chat-history-list');
+    try {
+      const list = await API.get('/api/chat/history');
+      chatState.history = list || [];
+      if (!list.length) {
+        container.innerHTML = emptyState('暂无对话历史', 'chat');
+        return;
+      }
+      container.innerHTML = list.map(h => `
+        <div class="chat-history-item ${h.id === chatState.currentHistoryId ? 'active' : ''}" onclick="loadChat('${escapeAttr(h.id)}')">
+          <div class="chat-history-title">${escapeHtml(h.title || '未命名对话')}</div>
+          <div class="chat-history-meta">
+            <span>${escapeHtml(h.model || '')}</span>
+            <span>${Fmt.timeAgo(h.updated_at)}</span>
+          </div>
+          <button class="chat-history-del" onclick="event.stopPropagation();deleteChat('${escapeAttr(h.id)}')">${Icons.trash(12)}</button>
+        </div>
+      `).join('');
+    } catch (err) {
+      container.innerHTML = emptyState('加载失败', 'error');
+    }
+  }
+
+  function newChat() {
+    chatState.currentHistoryId = null;
+    chatState.messages = [];
+    const _cm = document.getElementById('chat-messages'); if (_cm) _cm.innerHTML = `
+      <div class="chat-empty">
+        <div class="chat-empty-icon">${Icons.chat(48)}</div>
+        <h3>开始新对话</h3>
+        <p>选择模型，输入消息开始与AI对话</p>
+      </div>
+    `;
+    loadChatHistory();
+  }
+
+  async function loadChat(historyId) {
+    try {
+      const data = await API.get('/api/chat/history/' + historyId);
+      chatState.currentHistoryId = historyId;
+      chatState.messages = data.messages || [];
+      chatState.model = data.model || chatState.model;
+      const sel = document.getElementById('chat-model');
+      if (sel) sel.value = chatState.model;
+      renderChatMessages();
+      loadChatHistory();
+    } catch (err) {
+      Toast.error('加载对话失败：' + err.message);
+    }
+  }
+
+  async function deleteChat(historyId) {
+    const ok = await Modal.confirm({
+      title: '删除对话',
+      body: '<p>确定删除此对话历史？</p>',
+      danger: true,
+      okText: '删除',
+    });
+    if (!ok) return;
+    try {
+      await API.delete('/api/chat/history/' + historyId);
+      Toast.success('已删除');
+      if (chatState.currentHistoryId === historyId) newChat();
+      else loadChatHistory();
+    } catch (err) {
+      Toast.error(err.message);
+    }
+  }
+
+  function renderChatMessages() {
+    const container = document.getElementById('chat-messages');
+    if (!chatState.messages.length) {
+      container.innerHTML = `
+        <div class="chat-empty">
+          <div class="chat-empty-icon">${Icons.chat(48)}</div>
+          <h3>开始新对话</h3>
+          <p>选择模型，输入消息开始与AI对话</p>
+        </div>
+      `;
+      return;
+    }
+    container.innerHTML = chatState.messages.map(m => renderMessage(m)).join('');
+    container.scrollTop = container.scrollHeight;
+  }
+
+  function renderMessage(m) {
+    if (m.role === 'user') {
+      return `<div class="message user">
+        <div class="message-avatar">${Icons.user(20)}</div>
+        <div class="message-content">
+          <div class="message-role">我</div>
+          <div class="message-text">${escapeHtml(m.content)}</div>
+        </div>
+      </div>`;
+    }
+    // assistant
+    const reasoning = m.reasoning_content || m.reasoning || '';
+    const content = m.content || '';
+    let html = `<div class="message assistant">
+      <div class="message-avatar assistant">${Icons.cpu(20)}</div>
+      <div class="message-content">`;
+    if (reasoning && chatState.showReasoning) {
+      html += `
+        <div class="reasoning-block">
+          <div class="reasoning-header" onclick="this.parentElement.classList.toggle('collapsed')">
+            ${Icons.brain(14)} <span>推理过程</span>
+            <span class="reasoning-count">${reasoning.length} 字</span>
+            <span class="reasoning-toggle">${Icons.chevronDown(14)}</span>
+          </div>
+          <div class="reasoning-content">${escapeHtml(reasoning)}</div>
+        </div>
+      `;
+    }
+    if (m.search_results && m.search_results.length) {
+      html += `<div class="search-results">`;
+      m.search_results.forEach(r => {
+        html += `<div class="search-result-item">
+          <a href="${escapeAttr(r.url)}" target="_blank" class="search-result-title">${Icons.link(12)} ${escapeHtml(r.title)}</a>
+          <div class="search-result-snippet">${escapeHtml(r.snippet || r.content || '')}</div>
+        </div>`;
+      });
+      html += `</div>`;
+    }
+    html += `<div class="message-text">${escapeHtml(content)}</div>`;
+    html += `</div></div>`;
+    return html;
+  }
+
+  function toggleWebSearch() {
+    chatState.webSearch = !chatState.webSearch;
+    const btn = document.getElementById('web-search-btn');
+    btn.classList.toggle('primary', chatState.webSearch);
+    btn.innerHTML = `${Icons.globe(14)} 联网 ${chatState.webSearch ? '开' : '关'}`;
+  }
+
+  function toggleReasoning() {
+    chatState.showReasoning = !chatState.showReasoning;
+    const btn = document.getElementById('reasoning-btn');
+    btn.classList.toggle('primary', chatState.showReasoning);
+    btn.innerHTML = `${Icons.brain(14)} 推理 ${chatState.showReasoning ? '开' : '关'}`;
+    renderChatMessages();
+  }
+
+  async function sendMessage() {
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text || chatState.streaming) return;
+    input.value = '';
+    input.style.height = 'auto';
+    // 添加用户消息
+    chatState.messages.push({ role: 'user', content: text });
+    // 添加占位助手消息
+    const placeholder = { role: 'assistant', content: '', reasoning: '', streaming: true };
+    chatState.messages.push(placeholder);
+    renderChatMessages();
+    // 切换按钮
+    document.getElementById('chat-send').style.display = 'none';
+    document.getElementById('chat-stop').style.display = 'inline-flex';
+    chatState.streaming = true;
+    chatState.abortController = new AbortController();
+    try {
+      const payload = {
+        model: chatState.model,
+        messages: chatState.messages.filter(m => !m.streaming).map(m => ({ role: m.role, content: m.content })),
+        stream: true,
+      };
+      if (chatState.webSearch) payload.web_search = true;
+      const resp = await fetch('/api/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(payload),
+        signal: chatState.abortController.signal,
+      });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(errText || '请求失败');
+      }
+      // 流式读取
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const dataStr = line.slice(6).trim();
+          if (dataStr === '[DONE]') continue;
+          try {
+            const chunk = JSON.parse(dataStr);
+            // v10.0: 处理联网搜索结果
+            if (chunk.search_results) {
+              placeholder.search_results = chunk.search_results;
+              renderChatMessages();
+              continue;
+            }
+            const delta = chunk.choices?.[0]?.delta;
+            if (delta) {
+              if (delta.reasoning_content) placeholder.reasoning += delta.reasoning_content;
+              if (delta.content) placeholder.content += delta.content;
+              renderChatMessages();
+            }
+            if (chunk.usage) {
+              placeholder.usage = chunk.usage;
+            }
+          } catch (_) {}
+        }
+      }
+      placeholder.streaming = false;
+      renderChatMessages();
+      // 保存对话历史
+      try {
+        const title = text.slice(0, 30);
+        const messagesToSave = chatState.messages.filter(m => !m.streaming).map(m => ({
+          role: m.role,
+          content: m.content,
+          reasoning: m.reasoning || '',
+        }));
+        if (chatState.currentHistoryId) {
+          await API.put('/api/chat/history/' + chatState.currentHistoryId, {
+            title, model: chatState.model, messages: messagesToSave,
+          });
+        } else {
+          const result = await API.post('/api/chat/history', {
+            title, model: chatState.model, messages: messagesToSave,
+          });
+          chatState.currentHistoryId = result.id;
+        }
+        loadChatHistory();
+      } catch (_) {}
+    } catch (err) {
+      placeholder.streaming = false;
+      placeholder.content = '\n\n[请求失败：' + err.message + ']';
+      renderChatMessages();
+    } finally {
+      chatState.streaming = false;
+      chatState.abortController = null;
+      document.getElementById('chat-send').style.display = 'inline-flex';
+      document.getElementById('chat-stop').style.display = 'none';
+    }
+  }
+
+  function stopGeneration() {
+    if (chatState.abortController) {
+      chatState.abortController.abort();
+    }
+  }
+
+  /* ========== 模型列表页 ========== */
+  async function renderModels() {
+    setSidebarVisible(false);
+    highlightNav('/models');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">模型列表</h1>
+          <div class="toolbar">
+            <div class="search-box">
+              <span class="search-icon">${Icons.search(16)}</span>
+              <input type="text" id="model-search" class="input" placeholder="搜索模型名称或ID...">
+            </div>
+            <select id="model-filter" class="select" style="width:auto;min-width:120px">
+              <option value="all">全部模型</option>
+              <option value="chat">对话模型</option>
+              <option value="vision">视觉模型</option>
+              <option value="embed">嵌入模型</option>
+              <option value="code">代码模型</option>
+              <option value="safety">安全模型</option>
+            </select>
+            <button class="btn btn-gh btn-sm" onclick="refreshModels()" title="刷新模型列表">刷新</button>
+          </div>
+        </div>
+        <div id="models-list"></div>
+      </div>
+    `;
+    Loader.show('#models-list', '加载模型列表中');
+    try {
+      const models = await API.get('/api/chat/models');
+      // v10.0: 缓存模型名称映射供其他页面使用
+      window._modelNames = models || [];
+      renderModelsList(models || []);
+      const searchInput = document.getElementById('model-search');
+      const filterSelect = document.getElementById('model-filter');
+      const applyFilters = () => {
+        const keyword = searchInput.value.toLowerCase();
+        const filter = filterSelect.value;
+        const filtered = (models || []).filter(m => {
+          // 关键词过滤
+          const matchKeyword = !keyword || m.id.toLowerCase().includes(keyword) || (m.display_name || '').toLowerCase().includes(keyword);
+          // 分类过滤
+          const caps = m.capabilities || [];
+          let matchFilter = true;
+          if (filter === 'chat') matchFilter = caps.includes('推理') && !caps.includes('嵌入') && !caps.includes('安全');
+          else if (filter === 'vision') matchFilter = caps.includes('视觉');
+          else if (filter === 'embed') matchFilter = caps.includes('嵌入');
+          else if (filter === 'code') matchFilter = caps.includes('代码');
+          else if (filter === 'safety') matchFilter = caps.includes('安全');
+          return matchKeyword && matchFilter;
+        });
+        renderModelsList(filtered);
+      };
+      searchInput.addEventListener('input', debounce(applyFilters, 200));
+      filterSelect.addEventListener('change', applyFilters);
+    } catch (err) {
+      const _ml = document.getElementById('models-list'); if (_ml) _ml.innerHTML = emptyState('加载失败：' + err.message, 'error');
+    }
+  }
+  window.refreshModels = async function() {
+    const btn = document.querySelector('.toolbar .btn-gh');
+    if (btn) btn.textContent = '刷新中';
+    const _ml2 = document.getElementById('models-list'); if (_ml2) _ml2.innerHTML = '<div class="loader"><div class="sp"></div></div>';
+    try {
+      const models = await API.get('/api/chat/models?_=' + Date.now());
+      renderModelsList(models || []);
+      Toast.success('模型列表已更新');
+    } catch (err) {
+      Toast.error('刷新失败：' + err.message);
+    }
+    if (btn) btn.textContent = '刷新';
+  };
+
+  function renderModelsList(models) {
+    const container = document.getElementById('models-list');
+    if (!models.length) {
+      container.innerHTML = emptyState('未找到匹配的模型', 'models');
+      return;
+    }
+
+    // 厂商中文名映射
+    const publisherNames = {
+      'deepseek-ai': 'DeepSeek', 'z-ai': '智谱AI', 'qwen': '千问Qwen', 'moonshotai': '月之暗面Kimi',
+      'minimaxai': 'MiniMax', 'stepfun-ai': '阶跃星辰', 'openai': 'OpenAI', 'meta': 'Meta',
+      'mistralai': 'Mistral AI', 'nvidia': 'NVIDIA', 'google': 'Google', 'microsoft': 'Microsoft',
+      'ibm': 'IBM', 'bytedance': '字节跳动', 'baai': 'BAAI', 'nv-mistralai': 'NVIDIA-Mistral',
+      '01-ai': '零一万物', 'abacusai': 'Abacus.AI', 'writer': 'Writer', 'databricks': 'Databricks',
+      'bigcode': 'BigCode', 'ai21labs': 'AI21 Labs', 'aisingapore': 'AI Singapore',
+      'adept': 'Adept', 'poolside': 'Poolside', 'sarvamai': 'Sarvam AI',
+      'snowflake': 'Snowflake', 'thinkingmachines': 'Thinking Machines',
+      'upstage': 'Upstage', 'zyphra': 'Zyphra',
+    };
+
+    // 国产模型排前面
+    const domesticPublishers = ['deepseek-ai', 'z-ai', 'qwen', 'moonshotai', 'minimaxai', 'stepfun-ai', 'bytedance', '01-ai'];
+
+    // 按厂商分组
+    const groups = {};
+    models.forEach(m => {
+      const owner = m.owned_by || (m.id.includes('/') ? m.id.split('/')[0] : '其他');
+      if (!groups[owner]) groups[owner] = [];
+      groups[owner].push(m);
+    });
+
+    // 排序：国产模型优先
+    const sortedOwners = Object.keys(groups).sort((a, b) => {
+      const aDom = domesticPublishers.includes(a) ? 0 : 1;
+      const bDom = domesticPublishers.includes(b) ? 0 : 1;
+      if (aDom !== bDom) return aDom - bDom;
+      return groups[b].length - groups[a].length;
+    });
+
+    let html = `<div style="margin-bottom:12px;font-size:13px;color:var(--text-muted);">共 ${models.length} 个模型，${Object.keys(groups).length} 个厂商</div>`;
+    for (const owner of sortedOwners) {
+      const list = groups[owner];
+      const displayName = publisherNames[owner] || owner;
+      html += `
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">${escapeHtml(displayName)}</h3>
+            <span class="muted">${list.length} 个模型</span>
+          </div>
+          <div class="grid grid-3">
+            ${list.map(m => {
+              const caps = m.capabilities || [];
+              const isDeprecated = caps.includes('已弃用');
+              const capTags = caps.filter(c => c !== '已弃用');
+              const ctxLen = m.context_length;
+              const ctxStr = ctxLen ? (ctxLen >= 1000000 ? (ctxLen/1000000)+'M' : (ctxLen >= 1000 ? (ctxLen/1000)+'K' : ctxLen)) : '';
+              return `
+              <div class="model-card" ${isDeprecated ? 'style="opacity:0.6"' : ''}>
+                <div class="model-card-header">
+                  <div style="display:flex;flex-direction:column;flex:1;min-width:0">
+                    <span style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(m.display_name || m.id)}">${escapeHtml(m.display_name || m.id.split('/').pop())}</span>
+                    <span style="font-size:10px;color:var(--text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(m.id)}</span>
+                  </div>
+                  <button class="btn xs" onclick="copyToClipboard('${escapeAttr(m.id)}');Toast.success('模型ID已复制')" title="复制模型ID">${Icons.copy(12)}</button>
+                  ${isDeprecated ? '<span class="tag cooling">已弃用</span>' : ''}
+                </div>
+                <div class="model-caps">
+                  ${capTags.map(c => {
+                    let cls = 'info';
+                    if (c === '视觉') cls = 'warning';
+                    else if (c === '嵌入') cls = 'success';
+                    else if (c === '工具调用') cls = 'accent';
+                    else if (c === '1M上下文') cls = 'info';
+                    else if (c === '安全') cls = 'danger';
+                    else if (c === '代码') cls = 'success';
+                    else if (c === '推理') cls = 'accent';
+                    return `<span class="tag ${cls}">${escapeHtml(c)}</span>`;
+                  }).join('')}
+                  ${ctxStr ? `<span class="tag info">↑${ctxStr}</span>` : ''}
+                </div>
+              </div>
+            `}).join('')}
+          </div>
+        </div>
+      `;
+    }
+    container.innerHTML = html;
+  }
+
+  /* ========== 统计面板页 ========== */
+  async function renderStats() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/stats');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">统计面板</h1>
+          <button class="btn sm" onclick="renderStats()">${Icons.refresh(14)} 刷新</button>
+        </div>
+        <div id="stats-overview" class="grid grid-5"></div>
+        <div class="grid grid-2" style="margin-top:16px">
+          <div class="card">
+            <div class="card-header"><h3 class="card-title">7天请求趋势</h3></div>
+            <div id="stats-trend" style="height:260px"></div>
+          </div>
+          <div class="card">
+            <div class="card-header"><h3 class="card-title">模型使用分布</h3></div>
+            <div id="stats-models"></div>
+          </div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header"><h3 class="card-title">详细模型统计</h3></div>
+          <div id="stats-model-table"></div>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <div class="card-header">
+            <h3 class="card-title"><span style="color:var(--accent-warning)">\u{1F3C6}</span> 今日全平台排行榜</h3>
+            <span class="muted" id="stats-leaderboard-summary" style="font-size:12px"></span>
+          </div>
+          <div id="stats-leaderboard"></div>
+        </div>
+      </div>
+    `;
+    Loader.show('#stats-overview', '加载统计中');
+    Loader.show('#stats-trend', '加载趋势中');
+    Loader.show('#stats-models', '加载分布中');
+    Loader.show('#stats-model-table', '加载表格中');
+    Loader.show('#stats-leaderboard', '加载排行榜中');
+    try {
+      const [stats, ccs] = await Promise.all([
+        API.get('/api/user/stats'),
+        API.get('/api/user/concurrency-stats').catch(() => null),
+      ]);
+      const o = stats.overview || {};
+      const hasData = (o.total_requests || 0) > 0 || (stats.trend_7d || []).length > 0;
+      const elOverview = document.getElementById('stats-overview');
+      if (elOverview) elOverview.innerHTML = `
+        <div class="stat-card accent">
+          <div class="stat-label">今日请求</div>
+          <div class="stat-value">${Fmt.full(o.total_requests || 0)}</div>
+        </div>
+        <div class="stat-card success">
+          <div class="stat-label">今日Token</div>
+          <div class="stat-value" title="${Fmt.full(o.total_tokens || 0)}">${Fmt.number(o.total_tokens || 0)}</div>
+        </div>
+        <div class="stat-card warning">
+          <div class="stat-label">输入Token</div>
+          <div class="stat-value">${Fmt.number(o.prompt_tokens || 0)}</div>
+        </div>
+        <div class="stat-card info">
+          <div class="stat-label">输出Token</div>
+          <div class="stat-value">${Fmt.number(o.completion_tokens || 0)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">并发状态</div>
+          <div class="stat-value" style="font-size:18px">${ccs ? ccs.current+'/'+(ccs.limit_label||ccs.limit) : '...'}</div>
+          <div class="stat-trend flat">${ccs && ccs.tag ? ccs.tag : ccs ? '峰值 '+(ccs.peak||0) : ''}</div>
+        </div>
+      `;
+      renderTrendChart('stats-trend', stats.trend_7d || []);
+      renderModelDistribution('stats-models', stats.model_distribution || []);
+      renderModelTable('stats-model-table', stats.model_distribution || []);
+      // 无数据时显示友好提示
+      if (!hasData) {
+        const hint = document.createElement('div');
+        hint.className = 'card';
+        hint.style.cssText = 'margin-top:16px;border-left:3px solid var(--accent-info)';
+        hint.innerHTML = `<div style="padding:16px;display:flex;align-items:center;gap:12px">
+          ${Icons.info(20)}
+          <div>
+            <div style="font-weight:600;margin-bottom:4px">暂无统计数据</div>
+            <div class="muted">前往 <a href="#/console/chat" style="color:var(--accent-primary)">AI对话</a> 发起一次对话，统计数据将在请求后自动生成。</div>
+          </div>
+        </div>`;
+        const _mtEl = document.getElementById('stats-model-table');
+        if (_mtEl && _mtEl.parentElement) _mtEl.parentElement.appendChild(hint);
+      }
+      // 排行榜
+      try {
+        const lb = await API.get('/api/user/leaderboard?limit=20');
+        if (lb && lb.leaderboard && lb.leaderboard.length > 0) {
+          renderLeaderboard('stats-leaderboard', lb.leaderboard);
+          const summary = document.getElementById('stats-leaderboard-summary');
+          if (summary) summary.textContent = `今日活跃 ${lb.total?.active_users || 0} 人 · 总计 ${Fmt.number(lb.total?.total_requests || 0)} 请求 · ${Fmt.full(lb.total?.total_tokens || 0)} Tokens`;
+        } else {
+          const _lbEl = document.getElementById('stats-leaderboard');
+          if (_lbEl) _lbEl.innerHTML = '<div class="empty-state" style="padding:24px"><div class="muted">暂无排行数据</div></div>';
+        }
+      } catch (e) {
+        const _lbErrEl = document.getElementById('stats-leaderboard');
+        if (_lbErrEl) _lbErrEl.innerHTML = '<div class="empty-state" style="padding:24px"><div class="muted">排行榜加载失败</div></div>';
+      }
+    } catch (err) {
+      Toast.error('加载统计失败：' + err.message);
+      const _errEl = document.getElementById('stats-overview');
+      if (_errEl) _errEl.innerHTML = emptyState('加载失败，请刷新重试', 'error');
+    }
+  }
+
+  function renderModelTable(containerId, data) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    if (!data.length) {
+      container.innerHTML = emptyState('暂无模型使用记录');
+      return;
+    }
+    // v10.0: 模型友好名称映射
+    const modelDisplayNames = {};
+    try { window._modelNames && window._modelNames.forEach(m => { modelDisplayNames[m.id] = m.display_name || m.id; }); } catch(e) {}
+    container.innerHTML = `
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th class="numeric">请求数</th>
+              <th class="numeric">Token消耗</th>
+              <th>占比</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.map(m => {
+              const total = data.reduce((s, d) => s + (d.request_count || 0), 0);
+              const dname = m.display_name || modelDisplayNames[m.model] || m.model;
+              return `<tr>
+                <td><span title="${escapeHtml(m.model)}">${escapeHtml(dname)}</span><br><span class="text-xs text-muted">${escapeHtml(m.model)}</span></td>
+                <td class="numeric">${Fmt.full(m.request_count || 0)}</td>
+                <td class="numeric">${Fmt.full(m.token_count || 0)}</td>
+                <td>
+                  <div class="progress-bar">
+                    <div class="progress-fill" style="width:${Fmt.percent(m.request_count, total).replace('%','')}%"></div>
+                    <span>${Fmt.percent(m.request_count, total)}</span>
+                  </div>
+                </td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  /* ========== API 文档页 ========== */
+  function _docsContent() {
+    return `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">API文档</h1>
+          <p style="color:var(--text-muted);font-size:13px;margin-top:4px;">OpenAI 兼容接口，支持所有主流 SDK 和 IDE</p>
+        </div>
+
+        <!-- 基础信息 -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">基础信息</h3></div>
+          <div class="api-urls">
+            <div class="api-url-row">
+              <span class="api-url-label">Base URL:</span>
+              <code>https://your-domain.com/v1</code>
+              <button class="btn xs" onclick="copyToClipboard('https://your-domain.com/v1')">${Icons.copy(12)} 复制</button>
+            </div>
+            <div class="api-url-row">
+              <span class="api-url-label">完整端点:</span>
+              <code>https://your-domain.com/v1/chat/completions</code>
+              <button class="btn xs" onclick="copyToClipboard('https://your-domain.com/v1/chat/completions')">${Icons.copy(12)} 复制</button>
+            </div>
+            <div class="api-url-row">
+              <span class="api-url-label">兼容路径:</span>
+              <code>/v1/...</code> 和 <code>/api/v1/...</code> 均可使用
+            </div>
+          </div>
+        </div>
+
+        <!-- 认证方式 -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">认证方式</h3></div>
+          <p style="font-size:13px;line-height:1.8;">使用 Bearer Token 认证，在请求头中添加 <code>Authorization: Bearer YOUR_API_KEY</code></p>
+          <p style="font-size:13px;color:var(--text-muted);">也支持 <code>x-api-key: YOUR_API_KEY</code> 方式</p>
+          <div style="margin-top:12px;padding:12px;background:var(--bg-secondary);border-radius:var(--radius-md);font-size:12px;">
+            <div style="margin-bottom:6px;font-weight:600;">获取 API 密钥：</div>
+            <ol style="padding-left:20px;line-height:2;">
+              <li>进入 <a href="#/console/keys" style="color:var(--accent-primary);">密钥管理</a> 页面</li>
+              <li>点击「创建密钥」按钮</li>
+              <li>复制生成的密钥（以 <code>sk-</code> 开头，旧 <code>acu_</code> 密钥仍可使用）</li>
+              <li>每个用户最多创建 5 个密钥</li>
+            </ol>
+          </div>
+        </div>
+
+        <!-- 对话补全 API -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">对话补全 API</h3></div>
+          <p style="font-size:13px;margin-bottom:12px;"><code>POST /v1/chat/completions</code> — 支持流式和非流式响应</p>
+          <div class="code-block">
+            <div class="code-header">
+              <span>cURL</span>
+              <button class="btn xs" onclick="copyToClipboard(document.getElementById('code-chat').textContent)">${Icons.copy(12)}</button>
+            </div>
+            <pre id="code-chat"><code>curl https://your-domain.com/v1/chat/completions \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer YOUR_API_KEY" \\
+  -d '{
+    "model": "deepseek-ai/deepseek-v4-flashdeepseek-ai/deepseek-v4",
+    "messages": [
+      {"role": "system", "content": "你是一个有用的助手"},
+      {"role": "user", "content": "你好"}
+    ],
+    "stream": true,
+    "max_tokens": 4096
+  }'</code></pre>
+          </div>
+          <div style="margin-top:16px;">
+            <h4 style="font-size:13px;margin-bottom:8px;">请求参数</h4>
+            <div style="overflow-x:auto;">
+              <table style="width:100%;font-size:12px;border-collapse:collapse;">
+                <thead><tr style="border-bottom:1px solid var(--border-color);">
+                  <th style="text-align:left;padding:6px 10px;">参数</th>
+                  <th style="text-align:left;padding:6px 10px;">类型</th>
+                  <th style="text-align:left;padding:6px 10px;">必填</th>
+                  <th style="text-align:left;padding:6px 10px;">说明</th>
+                </tr></thead>
+                <tbody>
+                  <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>model</code></td><td>string</td><td>是</td><td>模型ID，如 deepseek-ai/deepseek-v4-flash</td></tr>
+                  <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>messages</code></td><td>array</td><td>是</td><td>消息数组，含 role 和 content</td></tr>
+                  <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>stream</code></td><td>boolean</td><td>否</td><td>是否流式输出，默认 false</td></tr>
+                  <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>max_tokens</code></td><td>integer</td><td>否</td><td>最大生成Token数</td></tr>
+                  <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>temperature</code></td><td>float</td><td>否</td><td>温度参数 0-2，默认 1</td></tr>
+                  <tr><td style="padding:6px 10px;"><code>top_p</code></td><td>float</td><td>否</td><td>核采样参数 0-1，默认 1</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- Python SDK -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Python SDK 示例</h3></div>
+          <div class="code-block">
+            <div class="code-header">
+              <span>Python (openai>=1.0)</span>
+              <button class="btn xs" onclick="copyToClipboard(document.getElementById('code-python').textContent)">${Icons.copy(12)}</button>
+            </div>
+            <pre id="code-python"><code>pip install openai
+
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="YOUR_API_KEY",
+    base_url="https://your-domain.com/v1"
+)
+
+# 非流式
+response = client.chat.completions.create(
+    model="deepseek-ai/deepseek-v4-flashdeepseek-ai/deepseek-v4",
+    messages=[{"role": "user", "content": "你好"}],
+)
+print(response.choices[0].message.content)
+
+# 流式
+response = client.chat.completions.create(
+    model="deepseek-ai/deepseek-v4-flashdeepseek-ai/deepseek-v4",
+    messages=[{"role": "user", "content": "你好"}],
+    stream=True
+)
+for chunk in response:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")</code></pre>
+          </div>
+        </div>
+
+        <!-- Node.js SDK -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">Node.js SDK 示例</h3></div>
+          <div class="code-block">
+            <div class="code-header">
+              <span>JavaScript (openai>=4.0)</span>
+              <button class="btn xs" onclick="copyToClipboard(document.getElementById('code-js').textContent)">${Icons.copy(12)}</button>
+            </div>
+            <pre id="code-js"><code>npm install openai
+
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: "YOUR_API_KEY",
+  baseURL: "https://your-domain.com/v1",
+});
+
+const response = await client.chat.completions.create({
+  model: "deepseek-ai/deepseek-v4-flashdeepseek-ai/deepseek-v4",
+  messages: [{ role: "user", content: "你好" }],
+  stream: true,
+});
+
+for await (const chunk of response) {
+  process.stdout.write(chunk.choices[0]?.delta?.content || "");
+}</code></pre>
+          </div>
+        </div>
+
+        <!-- Embeddings API -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">向量嵌入 API</h3></div>
+          <p style="font-size:13px;margin-bottom:12px;"><code>POST /v1/embeddings</code> — 文本向量化</p>
+          <div class="code-block">
+            <div class="code-header">
+              <span>Python</span>
+              <button class="btn xs" onclick="copyToClipboard(document.getElementById('code-embed').textContent)">${Icons.copy(12)}</button>
+            </div>
+            <pre id="code-embed"><code>response = client.embeddings.create(
+    model="nvidia/llama-3.1-8b-instruct",
+    input="Hello world"
+)
+print(response.data[0].embedding)</code></pre>
+          </div>
+        </div>
+
+        <!-- 模型列表 API -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">模型列表 API</h3></div>
+          <div class="code-block">
+            <div class="code-header">
+              <span>GET /v1/models</span>
+              <button class="btn xs" onclick="copyToClipboard(document.getElementById('code-models').textContent)">${Icons.copy(12)}</button>
+            </div>
+            <pre id="code-models"><code>curl https://your-domain.com/v1/models \\
+  -H "Authorization: Bearer YOUR_API_KEY"</code></pre>
+          </div>
+        </div>
+
+        <!-- 热门模型 -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">热门模型</h3></div>
+          <div style="overflow-x:auto;">
+            <table style="width:100%;font-size:12px;border-collapse:collapse;">
+              <thead><tr style="border-bottom:1px solid var(--border-color);">
+                <th style="text-align:left;padding:6px 10px;">模型ID</th>
+                <th style="text-align:left;padding:6px 10px;">厂商</th>
+                <th style="text-align:left;padding:6px 10px;">能力</th>
+              </tr></thead>
+              <tbody>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>deepseek-ai/deepseek-v4-flash</code></td><td>DeepSeek</td><td>推理 · 1M上下文</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>deepseek-ai/deepseek-v4-pro</code></td><td>DeepSeek</td><td>推理 · 1M上下文</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>z-ai/glm-5.2</code></td><td>智谱</td><td>推理 · Agentic</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>minimaxai/minimax-m3</code></td><td>MiniMax</td><td>推理 · 视觉 · 1M上下文</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>openai/gpt-oss-120b</code></td><td>OpenAI</td><td>推理</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>moonshotai/kimi-k2.6</code></td><td>月之暗面</td><td>推理 · 视觉 · Agentic</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>qwen/qwen3.5-397b-a17b</code></td><td>千问</td><td>推理 · 视觉 · 1M上下文</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>meta/llama-4-maverick-17b-128e-instruct</code></td><td>Meta</td><td>推理 · 视觉 · 1M上下文</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>nvidia/nemotron-3-ultra-550b-a55b</code></td><td>NVIDIA</td><td>推理 · 1M上下文</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>stepfun-ai/step-3.7-flash</code></td><td>阶跃星辰</td><td>推理 · 视觉</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;"><code>mistralai/mistral-medium-3.5-128b</code></td><td>Mistral</td><td>推理</td></tr>
+                <tr><td style="padding:6px 10px;"><code>google/gemma-4-31b-it</code></td><td>Google</td><td>推理</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p style="font-size:12px;color:var(--text-muted);margin-top:10px;">完整54个实测可用模型列表请查看 <a href="#/console/models" style="color:var(--accent-primary);">模型列表</a> 页面</p>
+        </div>
+
+        <!-- IDE 集成 -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">IDE 集成指南</h3></div>
+          <div style="font-size:13px;line-height:2;">
+            <div style="margin-bottom:12px;">
+              <h4 style="font-size:13px;">Cursor / CC Switch</h4>
+              <p style="color:var(--text-muted);font-size:12px;">Settings → Models → OpenAI API Base URL: <code>https://your-domain.com/v1</code></p>
+              <p style="color:var(--text-muted);font-size:12px;">API Key: 填入你的 AQUA 密钥</p>
+            </div>
+            <div style="margin-bottom:12px;">
+              <h4 style="font-size:13px;">Continue / Copilot</h4>
+              <p style="color:var(--text-muted);font-size:12px;">配置文件中设置 <code>apiBase: "https://your-domain.com/v1"</code></p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 错误码 -->
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">错误码说明</h3></div>
+          <div style="overflow-x:auto;">
+            <table style="width:100%;font-size:12px;border-collapse:collapse;">
+              <thead><tr style="border-bottom:1px solid var(--border-color);">
+                <th style="text-align:left;padding:6px 10px;">HTTP状态码</th>
+                <th style="text-align:left;padding:6px 10px;">错误码</th>
+                <th style="text-align:left;padding:6px 10px;">说明</th>
+              </tr></thead>
+              <tbody>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;">401</td><td><code>invalid_api_key</code></td><td>API密钥无效或已禁用</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;">400</td><td><code>invalid_json</code></td><td>请求体JSON格式错误</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;">400</td><td><code>invalid_request_error</code></td><td>请求参数错误</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;">403</td><td><code>no_api_key</code></td><td>没有可用的API密钥</td></tr>
+                <tr style="border-bottom:1px solid var(--border-color);"><td style="padding:6px 10px;">502</td><td><code>upstream_timeout</code></td><td>上游服务超时</td></tr>
+                <tr><td style="padding:6px 10px;">503</td><td><code>all_keys_exhausted</code></td><td>所有上游密钥耗尽</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    `;
+  }
+
+  /* 首页API文档（不需要登录） */
+  async function renderDocs() {
+    setSidebarVisible(false);
+    highlightNav('/docs');
+    const content = document.getElementById('content-area');
+    content.innerHTML = _docsContent();
+  }
+
+  /* 控制台API文档（需要登录，有侧边栏） */
+  async function renderConsoleDocs() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/docs');
+    updateUserInfo();
+    const content = document.getElementById('content-area');
+    content.innerHTML = _docsContent();
+  }
+
+  /* ========== 设置页 ========== */
+  async function renderSettings() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/settings');
+    const user = Auth.getUser();
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">设置</h1>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">个人资料</h3></div>
+          <form id="settings-form" style="max-width:480px">
+            <div class="form-group">
+              <label class="form-label">用户名</label>
+              <input type="text" class="input" value="${escapeAttr(user.username)}" disabled>
+            </div>
+            <div class="form-group">
+              <label class="form-label">邮箱</label>
+              <input type="email" class="input" value="${escapeAttr(user.email)}" disabled>
+            </div>
+            <div class="form-group">
+              <label class="form-label">显示名</label>
+              <input type="text" name="display_name" class="input" value="${escapeAttr(user.display_name || '')}" placeholder="设置显示名">
+            </div>
+            <button type="submit" class="btn primary">${Icons.check(16)} 保存</button>
+          </form>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">账户身份与权限</h3></div>
+          <div class="settings-special-info">
+            <div class="form-group">
+              <label class="form-label">用户身份</label>
+              <div style="display:flex;align-items:center;gap:8px;padding:8px 0">
+                <span class="tag ${escapeAttr(user.user_type === 'old' ? 'tag-old' : 'tag-new')}">${escapeHtml(user.user_type === 'old' ? '老用户' : '新用户')}</span>
+                ${user.special_tag ? `<span class="tag tag-special">${escapeHtml(user.special_tag)}</span>` : ''}
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">并发配置</label>
+              <div style="padding:8px 0;display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+                <span style="font-size:15px;font-weight:600;color:var(--text-primary)">${escapeHtml(String(user.concurrency_limit || 5))} 并发</span>
+                <span class="text-muted" style="font-size:13px">当前活跃：<strong style="color:var(--accent-primary)">${user.concurrency_current || 0}</strong></span>
+              </div>
+            </div>
+            ${user.special_reason ? `
+            <div class="form-group">
+              <label class="form-label">特殊说明</label>
+              <div style="padding:8px 0;color:var(--text-warning);font-size:13px">${escapeHtml(user.special_reason)}</div>
+            </div>` : ''}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">账户操作</h3></div>
+          <div class="settings-actions">
+            <button class="btn" onclick="Auth.logout()">${Icons.logout(16)} 退出登录</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3 class="card-title">主题</h3></div>
+          <div class="theme-settings">
+            <button class="btn" onclick="Theme.set('dark')">${Icons.moon(16)} 深色主题</button>
+            <button class="btn" onclick="Theme.set('light')">${Icons.sun(16)} 浅色主题</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.getElementById('settings-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const data = new FormData(e.target);
+      try {
+        await API.put('/api/user/settings', { display_name: data.get('display_name') });
+        Toast.success('设置已保存');
+        await Auth.fetchUser();
+        updateUserInfo();
+      } catch (err) {
+        Toast.error(err.message);
+      }
+    };
+  }
+
+  /* ========== 问题反馈页 ========== */
+  async function renderFeedback() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/feedback');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">问题反馈</h1>
+          <div class="muted">遇到问题？告诉我们，我们会尽快处理</div>
+        </div>
+        <div class="card" style="max-width:680px">
+          <div class="card-header"><h3 class="card-title">提交反馈</h3></div>
+          <form id="feedback-form">
+            <div class="form-group">
+              <label class="form-label">分类</label>
+              <select name="category" class="select" style="width:auto;min-width:140px">
+                <option value="功能异常">功能异常</option>
+                <option value="使用建议">使用建议</option>
+                <option value="模型问题">模型问题</option>
+                <option value="账户问题">账户问题</option>
+                <option value="其他">其他</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">标题 <span class="text-danger">*</span></label>
+              <input type="text" name="title" class="input" placeholder="简短描述您的问题" maxlength="200" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">详细描述 <span class="text-danger">*</span></label>
+              <textarea name="content" class="input" rows="5" placeholder="请详细描述您遇到的问题或建议..." maxlength="5000" required style="resize:vertical;min-height:100px"></textarea>
+              <div class="text-xs text-muted" style="margin-top:4px;text-align:right"><span id="feedback-chars">0</span>/5000</div>
+            </div>
+            <button type="submit" class="btn primary" id="feedback-submit-btn">发送反馈</button>
+          </form>
+        </div>
+        <div class="card" style="max-width:680px">
+          <div class="card-header">
+            <h3 class="card-title">我的反馈</h3>
+            <span id="feedback-count" class="text-muted" style="font-size:12px"></span>
+          </div>
+          <div id="feedback-list"><div class="loader-wrap"><div class="loader-text">加载中...</div></div></div>
+        </div>
+      </div>
+    `;
+    // 字符计数
+    const ta = content.querySelector('textarea[name="content"]');
+    ta.oninput = () => document.getElementById('feedback-chars').textContent = ta.value.length;
+    // 提交
+    document.getElementById('feedback-form').onsubmit = async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('feedback-submit-btn');
+      btn.disabled = true; btn.textContent = '提交中...';
+      const fd = new FormData(e.target);
+      try {
+        await API.post('/api/user/feedback', { category: fd.get('category'), title: fd.get('title'), content: fd.get('content') });
+        Toast.success('反馈已提交，感谢您的支持！');
+        e.target.reset();
+        document.getElementById('feedback-chars').textContent = '0';
+        loadFeedbackList();
+      } catch (err) {
+        Toast.error(err.message);
+      } finally {
+        btn.disabled = false; btn.textContent = '发送反馈';
+      }
+    };
+    loadFeedbackList();
+  }
+
+  async function loadFeedbackList() {
+    try {
+      const data = await API.get('/api/user/feedback?page=1&page_size=20');
+      const el = document.getElementById('feedback-list');
+      const countEl = document.getElementById('feedback-count');
+      if (!el) return;
+      if (countEl) countEl.textContent = '共 ' + (data.total || 0) + ' 条';
+      if (!data.data || data.data.length === 0) {
+        el.innerHTML = '<div class="empty-state"><div class="empty-icon">' + Icons.alert(32) + '</div><div>暂无反馈记录</div></div>';
+        return;
+      }
+      const statusLabels = { pending: '待处理', processing: '处理中', resolved: '已解决', closed: '已关闭' };
+      const statusColors = { pending: 'var(--accent-warning)', processing: 'var(--accent-info)', resolved: 'var(--accent-success)', closed: 'var(--text-muted)' };
+      el.innerHTML = data.data.map(f => {
+        const st = statusLabels[f.status] || f.status;
+        const sc = statusColors[f.status] || 'var(--text-muted)';
+        return '<div class="feedback-item" style="padding:12px 0;border-bottom:1px solid var(--border-light)">' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">' +
+            '<strong style="font-size:13px">' + escapeHtml(f.title) + '</strong>' +
+            '<span class="tag" style="background:rgba(0,0,0,0.1);color:' + sc + ';font-size:10px">' + st + '</span>' +
+          '</div>' +
+          '<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">' + escapeHtml(f.content || '').slice(0, 200) + (f.content && f.content.length > 200 ? '...' : '') + '</div>' +
+          (f.reply ? '<div style="font-size:12px;color:var(--accent-primary);padding:6px 10px;background:rgba(0,212,255,0.06);border-radius:6px;margin-bottom:4px"><strong>回复：</strong>' + escapeHtml(f.reply) + '</div>' : '') +
+          '<div style="font-size:11px;color:var(--text-muted)">' + f.created_at.slice(0, 19).replace('T', ' ') + '</div>' +
+        '</div>';
+      }).join('');
+    } catch (err) {
+      const el = document.getElementById('feedback-list');
+      if (el) el.innerHTML = '<div class="empty-state"><div class="empty-icon">' + Icons.alert(36) + '</div><div>加载失败: ' + escapeHtml(err.message) + '</div></div>';
+    }
+  }
+
+  /* ========== 辅助函数 ========== */
+  async function ensureAuth() {
+    if (!Auth.isLoggedIn()) {
+      const user = await Auth.fetchUser();
+      if (!user) {
+        Router.go('/login');
+        return false;
+      }
+    }
+    updateUserInfo();
+    return true;
+  }
+
+  function bindPasswordToggle() {
+    document.querySelectorAll('[data-toggle]').forEach(btn => {
+      btn.onclick = () => {
+        const id = btn.dataset.toggle;
+        const input = document.getElementById(id);
+        if (input.type === 'password') {
+          input.type = 'text';
+          btn.innerHTML = Icons.eyeOff(16);
+        } else {
+          input.type = 'password';
+          btn.innerHTML = Icons.eye(16);
+        }
+      };
+    });
+  }
+
+  function renderTrendChart(containerId, data) {
+    const container = document.getElementById(containerId);
+    if (!data || !data.length) {
+      container.innerHTML = emptyState('暂无趋势数据');
+      return;
+    }
+    const max = Math.max(...data.map(d => d.request_count || 0), 1);
+    container.innerHTML = `
+      <div class="chart-bars">
+        ${data.map(d => {
+          const h = Math.max(4, (d.request_count / max) * 200);
+          return `
+            <div class="chart-bar-item" title="${escapeHtml(d.date)}: ${d.request_count}次 / ${Fmt.full(d.token_count||0)} tokens">
+              <div class="chart-bar-value">${d.request_count}</div>
+              <div class="chart-bar" style="height:${h}px"></div>
+              <div class="chart-bar-label">${escapeHtml((d.date || '').slice(5))}</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  function renderStatusDistribution(containerId, logs) {
+    const container = document.getElementById(containerId);
+    if (!logs.length) {
+      container.innerHTML = emptyState('暂无请求数据');
+      return;
+    }
+    const groups = {};
+    logs.forEach(l => {
+      const s = l.status || 'unknown';
+      groups[s] = (groups[s] || 0) + 1;
+    });
+    const total = logs.length;
+    container.innerHTML = `
+      <div class="status-dist">
+        ${Object.entries(groups).map(([s, n]) => {
+          const pct = (n / total * 100).toFixed(1);
+          const stInfo = Fmt.status(s);
+          return `
+            <div class="status-dist-item">
+              <div class="status-dist-label">
+                <span class="status-dot ${stInfo.cls}"></span>
+                <span>${stInfo.text}</span>
+                <span class="muted">${n}次 (${pct}%)</span>
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill ${stInfo.cls}" style="width:${pct}%"></div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  function renderModelDistribution(containerId, data) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    if (!data.length) {
+      container.innerHTML = emptyState('暂无模型使用数据');
+      return;
+    }
+    const total = data.reduce((s, d) => s + (d.request_count || 0), 0) || 1;
+    const colors = ['#00d4ff', '#448aff', '#00e676', '#ffab00', '#ff5252', '#ff4081', '#9c27b0', '#3f51b5'];
+    // v10.0: 显示友好名称
+    const modelDisplayNames = {};
+    try { window._modelNames && window._modelNames.forEach(m => { modelDisplayNames[m.id] = m.display_name || m.id; }); } catch(e) {}
+    container.innerHTML = `
+      <div class="model-dist">
+        ${data.slice(0, 8).map((d, i) => {
+          const pct = ((d.request_count || 0) / total * 100).toFixed(1);
+          const display = d.display_name || modelDisplayNames[d.model] || d.model;
+          return `
+            <div class="model-dist-item">
+              <div class="model-dist-label">
+                <span class="legend-dot" style="background:${colors[i % colors.length]}"></span>
+                <span style="font-size:11px">${escapeHtml(display)}</span>
+                <span class="muted">${pct}%</span>
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill" style="width:${pct}%;background:${colors[i % colors.length]}"></div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  function renderRecentLogs(containerId, logs) {
+    const container = document.getElementById(containerId);
+    if (!logs.length) {
+      container.innerHTML = emptyState('暂无请求记录');
+      return;
+    }
+    container.innerHTML = `
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th>状态</th>
+              <th class="numeric">Token(输入/输出/总计)</th>
+              <th class="numeric">延迟</th>
+              <th>时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${logs.map(l => {
+              const st = Fmt.status(l.status);
+              const lat = Fmt.latency(l.latency_ms);
+              const latColor = Fmt.latencyColor(l.latency_ms);
+              return `<tr>
+                <td><code>${escapeHtml(l.model || '-')}</code></td>
+                <td><span class="tag ${st.cls}"><span class="status-dot ${st.cls}"></span>${st.text}</span></td>
+                <td class="numeric">
+                  <span class="token-cell">
+                    <span class="token-in">${Fmt.number(l.prompt_tokens || 0)}</span> /
+                    <span class="token-out">${Fmt.number(l.completion_tokens || 0)}</span> /
+                    <span class="token-total">${Fmt.number(l.total_tokens || 0)}</span>
+                  </span>
+                </td>
+                <td class="numeric" style="color:${latColor}">${lat}</td>
+                <td class="muted">${Fmt.timeAgo(l.created_at)}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  /* ========== 排行榜渲染（今日全平台） ========== */
+  function renderLeaderboard(containerId, data) {
+    const container = document.getElementById(containerId);
+    if (!data || !data.length) {
+      container.innerHTML = '<div class="empty-state" style="padding:24px"><div class="muted">暂无排行数据</div></div>';
+      return;
+    }
+    const medals = ['\u{1F947}', '\u{1F948}', '\u{1F949}'];
+    container.innerHTML = `
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th class="numeric" style="width:40px">#</th>
+              <th>用户</th>
+              <th class="numeric">请求数</th>
+              <th class="numeric">Token总量</th>
+              <th class="numeric">输入Token</th>
+              <th class="numeric">输出Token</th>
+              <th class="numeric">平均延迟</th>
+              <th class="numeric">模型数</th>
+              <th class="numeric">成功率</th>
+              <th class="numeric">流式</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.map((u, i) => {
+              const rank = i + 1;
+              const medal = rank <= 3 ? medals[rank - 1] : '';
+              const successRate = u.total_requests > 0 ? ((u.success_count / u.total_requests) * 100).toFixed(1) : '0.0';
+              const isSelf = false; // 可以后续扩展标记当前用户
+              const rowCls = isSelf ? 'style="background:var(--accent-bg)"' : '';
+              return `<tr ${rowCls}>
+                <td class="numeric" style="font-size:16px;font-weight:700">${medal || rank}</td>
+                <td><strong>${escapeHtml(u.client_name || '未知用户')}</strong>${isSelf ? ' <span class="tag primary sm">我</span>' : ''}</td>
+                <td class="numeric"><strong>${Fmt.number(u.total_requests)}</strong></td>
+                <td class="numeric">${Fmt.full(u.total_tokens)}</td>
+                <td class="numeric">${Fmt.full(u.prompt_tokens)}</td>
+                <td class="numeric">${Fmt.full(u.completion_tokens)}</td>
+                <td class="numeric">${Fmt.latency(u.avg_latency)}</td>
+                <td class="numeric">${u.model_count}</td>
+                <td class="numeric"><span style="color:${successRate >= 95 ? 'var(--accent-success)' : successRate >= 80 ? 'var(--accent-warning)' : 'var(--accent-danger)'}">${successRate}%</span></td>
+                <td class="numeric">${u.stream_count}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  /* ========== 请求日志页 ========== */
+  let logsState = { page: 1, pageSize: 20, total: 0, data: [], sort: { field: 'created_at', order: 'desc' } };
+  async function renderLogs() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/logs');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">请求日志</h1>
+          <button class="btn sm" onclick="renderLogs()">${Icons.refresh(14)} 刷新</button>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">日志列表</h3>
+            <span class="muted" id="logs-total">-</span>
+          </div>
+          <div id="logs-table"></div>
+          <div id="logs-pagination"></div>
+        </div>
+      </div>
+    `;
+    await loadLogs();
+  }
+
+  async function loadLogs() {
+    const container = document.getElementById('logs-table');
+    Loader.show(container, '加载日志中');
+    try {
+      const result = await API.get(`/api/user/request-logs?page=${logsState.page}&page_size=${logsState.pageSize}`);
+      logsState.data = result.data || [];
+      logsState.total = result.total || 0;
+      document.getElementById('logs-total').textContent = `共 ${Fmt.full(logsState.total)} 条`;
+      renderLogsTable();
+      renderPagination(document.getElementById('logs-pagination'), logsState.total, logsState.page, logsState.pageSize, (p) => {
+        logsState.page = p;
+        loadLogs();
+      });
+    } catch (err) {
+      container.innerHTML = emptyState('加载失败：' + err.message, 'error');
+    }
+  }
+
+  function renderLogsTable() {
+    const container = document.getElementById('logs-table');
+    const data = applySort(logsState.data, logsState.sort.field, logsState.sort.order);
+    if (!data.length) {
+      container.innerHTML = emptyState('暂无请求日志');
+      return;
+    }
+    container.innerHTML = `
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th data-sort="model">模型</th>
+              <th data-sort="is_stream">类型</th>
+              <th data-sort="status">状态</th>
+              <th data-sort="prompt_tokens" class="numeric">输入Token</th>
+              <th data-sort="completion_tokens" class="numeric">输出Token</th>
+              <th data-sort="total_tokens" class="numeric">总计Token</th>
+              <th data-sort="latency_ms" class="numeric">延迟</th>
+              <th data-sort="created_at">时间</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.map((l, i) => {
+              const st = Fmt.status(l.status);
+              const lat = Fmt.latency(l.latency_ms);
+              const latColor = Fmt.latencyColor(l.latency_ms);
+              return `<tr>
+                <td><code>${escapeHtml(l.model || '-')}</code></td>
+                <td>${l.is_stream ? '<span class="tag info">流式</span>' : '<span class="tag">非流式</span>'}</td>
+                <td><span class="tag ${st.cls}"><span class="status-dot ${st.cls}"></span>${st.text}</span></td>
+                <td class="numeric token-in">${Fmt.number(l.prompt_tokens || 0)}</td>
+                <td class="numeric token-out">${Fmt.number(l.completion_tokens || 0)}</td>
+                <td class="numeric token-total" title="${Fmt.full(l.total_tokens || 0)}">${Fmt.number(l.total_tokens || 0)}</td>
+                <td class="numeric" style="color:${latColor}">${lat}</td>
+                <td class="muted">${Fmt.time(l.created_at)}</td>
+                <td><button class="btn xs" onclick="showLogDetail(${i})">${Icons.eye(12)}</button></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+    // 绑定排序
+    container.querySelectorAll('th[data-sort]').forEach(th => {
+      th.classList.toggle('sort-asc', logsState.sort.field === th.dataset.sort && logsState.sort.order === 'asc');
+      th.classList.toggle('sort-desc', logsState.sort.field === th.dataset.sort && logsState.sort.order === 'desc');
+      th.onclick = () => {
+        const field = th.dataset.sort;
+        if (logsState.sort.field === field) {
+          logsState.sort.order = logsState.sort.order === 'asc' ? 'desc' : 'asc';
+        } else {
+          logsState.sort = { field, order: 'asc' };
+        }
+        renderLogsTable();
+      };
+    });
+  }
+
+  function showLogDetail(idx) {
+    const l = logsState.data[idx];
+    if (!l) return;
+    Modal.show({
+      title: '请求详情',
+      body: `
+        <div class="log-detail">
+          <div class="detail-row"><span class="detail-label">模型</span><code>${escapeHtml(l.model || '-')}</code></div>
+          <div class="detail-row"><span class="detail-label">类型</span>${l.is_stream ? '流式' : '非流式'}</div>
+          <div class="detail-row"><span class="detail-label">状态</span>${escapeHtml(l.status || '-')}</div>
+          <div class="detail-row"><span class="detail-label">输入Token</span>${Fmt.full(l.prompt_tokens || 0)}</div>
+          <div class="detail-row"><span class="detail-label">输出Token</span>${Fmt.full(l.completion_tokens || 0)}</div>
+          <div class="detail-row"><span class="detail-label">总计Token</span>${Fmt.full(l.total_tokens || 0)}</div>
+          <div class="detail-row"><span class="detail-label">延迟</span>${Fmt.latency(l.latency_ms)}</div>
+          <div class="detail-row"><span class="detail-label">时间</span>${Fmt.time(l.created_at)}</div>
+          ${l.error_msg ? `<div class="detail-row"><span class="detail-label">错误信息</span><pre class="error-pre">${escapeHtml(l.error_msg)}</pre></div>` : ''}
+        </div>
+      `,
+      footer: `<button class="btn primary" onclick="closeModal()">关闭</button>`,
+    });
+  }
+
+  /* ========== QQ群入群页 ========== */
+  async function renderQQGroups() {
+    setSidebarVisible(false);
+    highlightNav('/qq-groups');
+    const content = document.getElementById('content-area');
+
+    // QQ群数据（预留扩展接口，添加新群只需在数组中追加即可）
+    const groups = [
+      {
+        name: 'AQUA AI 三群',
+        number: '1073851223',
+        link: 'https://qm.qq.com/q/jGnpIQWY5c',
+        desc: '最新交流群（推荐加入），目前仍有空位',
+        color: '#00d4ff',
+        gradient: 'linear-gradient(135deg, #00d4ff, #0099cc)',
+        members: '新群',
+        status: 'active',
+        tags: ['最新', '新用户推荐', '推荐加入'],
+      },
+      {
+        name: 'AQUA AI 二群',
+        number: '957919628',
+        link: 'https://qm.qq.com/q/gCxec4AezK',
+        desc: '备用交流群（已满员），请加三群',
+        color: '#6c757d',
+        gradient: 'linear-gradient(135deg, #6c757d, #495057)',
+        members: '200人',
+        status: 'full',
+        tags: ['备用群', '人已满', '请加三群'],
+      },
+      {
+        name: 'AQUA AI 一群',
+        number: '1038910590',
+        link: 'https://qm.qq.com/q/5e4t2bCK',
+        desc: '主交流群（已满员），AI模型使用讨论、技术交流、问题反馈',
+        color: '#12b7f5',
+        gradient: 'linear-gradient(135deg, #12b7f5, #0d96d6)',
+        members: '200人',
+        status: 'full',
+        tags: ['主群', '人已满', '不推荐加'],
+      },
+    ];
+
+    content.innerHTML = `
+      <div class="page" style="max-width:800px;margin:0 auto;padding:40px 20px">
+        <div style="text-align:center;margin-bottom:40px">
+          <div style="font-size:48px;margin-bottom:16px">💬</div>
+          <h1 style="font-size:28px;margin-bottom:8px">加入 AQUA AI 交流群</h1>
+          <p style="color:var(--text-muted);font-size:15px">与开发者和用户一起交流AI使用技巧、反馈问题、获取最新动态</p>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:20px">
+          ${groups.map(g => `
+            <div style="background:var(--card);border-radius:16px;overflow:hidden;border:1px solid var(--border);transition:transform .2s,box-shadow .2s" onmouseover="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 32px rgba(0,0,0,0.12)'" onmouseout="this.style.transform='';this.style.boxShadow=''">
+              <div style="background:${g.gradient};padding:24px;color:#fff;position:relative;overflow:hidden">
+                <div style="position:absolute;right:-20px;top:-20px;width:100px;height:100px;background:rgba(255,255,255,0.1);border-radius:50%"></div>
+                <div style="position:absolute;right:30px;bottom:-30px;width:80px;height:80px;background:rgba(255,255,255,0.06);border-radius:50%"></div>
+                <h2 style="font-size:22px;margin:0 0 4px;font-weight:700">${escapeHtml(g.name)}</h2>
+              </div>
+              <div style="padding:24px">
+                <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px">
+                  <div>
+                    <div style="font-size:13px;color:var(--text-muted);margin-bottom:4px">群号</div>
+                    <div style="display:flex;align-items:center;gap:8px">
+                      <code style="font-size:20px;font-weight:700;color:var(--text-primary);letter-spacing:1px">${escapeHtml(g.number)}</code>
+                      <button class="btn sm" onclick="copyToClipboard('${g.number}');Toast.success('群号已复制')" style="padding:4px 10px;font-size:12px">复制</button>
+                    </div>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:16px">
+                    <div style="text-align:center">
+                      <div style="font-size:13px;color:var(--text-muted)">成员</div>
+                      <div style="font-size:16px;font-weight:600">${escapeHtml(g.members)}</div>
+                    </div>
+                    <a href="${escapeAttr(g.link)}" target="_blank" rel="noopener noreferrer" class="btn lg" style="background:${g.gradient};color:#fff;border:none;padding:10px 28px;font-size:15px;font-weight:600;border-radius:10px;text-decoration:none;box-shadow:0 4px 16px ${g.color}44;transition:all .2s" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 6px 24px ${g.color}66'" onmouseout="this.style.transform='';this.style.boxShadow='0 4px 16px ${g.color}44'">
+                      立即加入 →
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+
+        <div style="margin-top:32px;padding:20px;background:var(--card);border-radius:12px;border:1px solid var(--border)">
+          <h3 style="font-size:15px;margin-bottom:12px">📖 加群须知</h3>
+          <ul style="color:var(--text-secondary);font-size:13px;line-height:2;padding-left:20px;margin:0">
+            <li>入群后请阅读群公告，遵守群规</li>
+            <li>遇到问题请先查看 <a href="#/docs" style="color:var(--primary)">API文档</a> 和 <a href="#/models" style="color:var(--primary)">模型列表</a></li>
+            <li>反馈问题时请提供：使用的模型、错误信息、请求参数</li>
+            <li>一群、二群已满员，请加入三群，三个群内容同步</li>
+          </ul>
+        </div>
+      </div>
+    `;
+  }
+
+  /* ========== 赞助页面 ========== */
+  async function renderSponsor() {
+    setSidebarVisible(false);
+    highlightNav('/sponsor');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="sponsor-page">
+        <div class="sponsor-header">
+          <div style="font-size:48px;margin-bottom:12px">\u{1F49D}</div>
+          <h1>支持 AQUA AI平台</h1>
+          <p>你的每一份心意，都是让平台持续运转的动力</p>
+        </div>
+
+        <div class="sponsor-usage">
+          <div class="sponsor-usage-item">
+            <div class="pct" style="color:var(--accent-success)">65%</div>
+            <div class="lbl">项目运营与维护</div>
+            <div class="desc">用于平台日常维护、上游API对接、功能开发、技术迭代、社区运营</div>
+          </div>
+          <div class="sponsor-usage-item">
+            <div class="pct">35%</div>
+            <div class="lbl">服务器与带宽</div>
+            <div class="desc">用于云服务器租赁、带宽流量、域名解析等基础设施</div>
+          </div>
+        </div>
+
+        <div class="sponsor-warm">\u{2764}\u{FE0F} 心意到就行，多少都可以</div>
+
+        <div class="sponsor-qrcodes">
+          <div class="sponsor-qr-item" onclick="showSponsorQR('wechat')">
+            <img src="/static/images/sponsor/wechat.jpg" alt="微信支付收款码" loading="lazy">
+            <div class="qr-label">\u{1F4B1} 微信支付</div>
+            <div class="qr-hint">点击查看大图 \u{1F50D}</div>
+          </div>
+          <div class="sponsor-qr-item" onclick="showSponsorQR('alipay')">
+            <img src="/static/images/sponsor/alipay.jpg" alt="支付宝收款码" loading="lazy">
+            <div class="qr-label">\u{1F4B0} 支付宝</div>
+            <div class="qr-hint">点击查看大图 \u{1F50D}</div>
+          </div>
+        </div>
+
+        <div class="sponsor-disclaimer">
+          <strong>\u{26A0}\u{FE0F} 免责声明</strong><br><br>
+          1. 本平台为免费开源性质，赞助款项完全用于服务器维护和项目运营，不附加任何回报承诺。<br>
+          2. 赞助为自愿行为，赞助金额不限，赞助后不提供退款服务。<br>
+          3. 平台运营方保留对赞助资金使用的最终解释权。<br>
+          4. 如有任何疑问，请通过QQ群联系管理员。
+        </div>
+      </div>
+    `;
+  }
+
+  // 赞助二维码放大显示
+  function showSponsorQR(type) {
+    const imgSrc = type === 'wechat' ? '/static/images/sponsor/wechat.jpg' : '/static/images/sponsor/alipay.jpg';
+    const label = type === 'wechat' ? '微信支付' : '支付宝';
+    const overlay = document.createElement('div');
+    overlay.className = 'sponsor-modal-overlay';
+    overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
+    overlay.innerHTML = '<div class="sponsor-modal-content" onclick="event.stopPropagation()">' +
+      '<img src="' + imgSrc + '" alt="' + label + '收款码">' +
+      '<div class="qr-label" style="color:#333;margin-top:12px">' + label + '</div>' +
+      '<div class="close-hint">点击任意区域关闭</div></div>';
+    document.body.appendChild(overlay);
+  }
+
+  // 免责协议确认提示
+  function showDisclaimerNotice() {
+    const overlay = document.createElement('div');
+    overlay.className = 'sponsor-modal-overlay';
+    overlay.id = 'disclaimer-notice';
+    overlay.innerHTML = '<div class="sponsor-modal-content" style="max-width:480px;padding:28px">' +
+      '<div style="font-size:36px;margin-bottom:12px">\u{1F4DC}</div>' +
+      '<h2 style="font-size:18px;margin-bottom:10px;color:#333">免责协议更新通知</h2>' +
+      '<p style="font-size:14px;color:#666;line-height:1.8;margin-bottom:16px;text-align:left">' +
+      'AQUA平台已更新<a href="#/legal/disclaimer" style="color:#0066cc;text-decoration:underline" onclick="document.getElementById(\'disclaimer-notice\').remove()">《免责协议》</a>，' +
+      '请花时间阅读了解你的权利和义务。继续使用本平台即表示你接受更新后的协议。</p>' +
+      '<button class="btn primary block" onclick="confirmDisclaimer()" style="padding:10px">我已阅读并了解</button></div>';
+    document.body.appendChild(overlay);
+  }
+
+  function confirmDisclaimer() {
+    localStorage.setItem('disclaimer_ack_20260722', '1');
+    const el = document.getElementById('disclaimer-notice');
+    if (el) el.remove();
+    Toast.success('感谢确认');
+  }
+
+  /* ========== 免责协议页面 ========== */
+  async function renderDisclaimer() {
+    setSidebarVisible(false);
+    highlightNav('');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="legal-page">
+        <div class="legal-header">
+          <h1>📜 AQUA 平台免责协议</h1>
+          <div class="update-date">最后更新：2026年7月22日 | 生效日期：2026年7月22日</div>
+        </div>
+
+        <div class="legal-toc">
+          <div class="legal-toc-title">📋 目录</div>
+          <a href="#legal-s1">一、平台性质声明</a>
+          <a href="#legal-s2">二、免费服务声明</a>
+          <a href="#legal-s3">三、服务使用风险</a>
+          <a href="#legal-s4">四、责任范围界定</a>
+          <a href="#legal-s5">五、服务中断与稳定性免责</a>
+          <a href="#legal-s6">六、数据安全声明</a>
+          <a href="#legal-s7">七、第三方链接</a>
+          <a href="#legal-s8">八、知识产权保护</a>
+          <a href="#legal-s9">九、隐私保护</a>
+          <a href="#legal-s10">十、用户行为规范</a>
+          <a href="#legal-s11">十一、适用法律</a>
+          <a href="#legal-s12">十二、协议更新</a>
+        </div>
+
+        <div class="legal-section" id="legal-s1">
+          <h2>一、平台性质声明</h2>
+          <p>1.1 AQUA平台（以下简称"本平台"）是一个免费开源的AI服务平台，旨在为开发者提供免费的人工智能模型调用服务。</p>
+          <p>1.2 本平台为非商业运营性质，不向用户收取任何服务费用，所有运营成本由运营方自行承担。</p>
+          <p>1.3 本平台聚合的AI模型来自第三方服务商（包括但不限于NVIDIA NIM等），平台仅提供中间调度和代理服务，不直接提供任何AI模型能力。</p>
+          <p>1.4 使用本平台即表示您已阅读、理解并同意本协议的全部条款。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s2">
+          <h2>二、免费服务声明</h2>
+          <p>2.1 本平台完全免费，不向用户收取任何形式的服务费、会员费、订阅费或使用费。</p>
+          <p>2.2 本平台不会以任何理由要求用户付费购买"加速通道"、"优先队列"、"高级权限"等增值服务。</p>
+          <p>2.3 本平台不会要求用户提供任何形式的付费信息，包括但不限于银行卡号、支付密码、验证码等。</p>
+          <p>2.4 任何以本平台名义向用户收费的行为均属欺诈，请用户提高警惕并通过官方渠道核实。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s3">
+          <h2>三、服务使用风险</h2>
+          <p>3.1 本平台按"现状"和"可用"的基础提供服务，不提供任何形式的明示或暗示保证。</p>
+          <p>3.2 用户在使用本平台服务时，应自行评估和承担使用AI模型可能产生的风险，包括但不限于：</p>
+          <ul>
+            <li>AI生成内容的准确性、完整性和可靠性</li>
+            <li>AI生成内容可能存在的偏见、歧视或不适当内容</li>
+            <li>因使用AI生成内容导致的任何直接或间接损失</li>
+            <li>因网络延迟、服务中断等原因导致的请求失败</li>
+          </ul>
+          <p>3.3 用户应遵守《中华人民共和国网络安全法》、《数据安全法》等相关法律法规，不得利用本平台服务从事违法违规活动。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s4">
+          <h2>四、责任范围界定</h2>
+          <p>4.1 本平台不对AI模型生成的输出内容负责。AI模型的输出由上游模型服务商提供，不代表本平台的立场或观点。</p>
+          <p>4.2 本平台不对因使用服务导致的任何直接、间接、偶然、特殊或惩罚性损害承担责任，包括但不限于：</p>
+          <ul>
+            <li>利润、数据、商誉或其他无形资产的损失</li>
+            <li>服务使用中断或数据丢失</li>
+            <li>第三方未经授权访问用户数据</li>
+            <li>任何第三方声明或索赔</li>
+          </ul>
+          <p>4.3 本平台的责任限制适用于法律允许的最大范围，不影响消费者依法享有的不可排除的法定权利。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s5">
+          <h2>五、服务中断与稳定性免责</h2>
+          <p>5.1 <strong>本平台为免费开源服务，不保证服务的连续性和稳定性。</strong>服务可用性可能低于商业化付费服务。</p>
+          <p>5.2 本平台不对服务响应速度、可用时长、请求成功率等性能指标作出任何承诺。</p>
+          <p>5.3 请勿将本平台用于任何对稳定性有严格要求的生产环境、商业应用或关键业务场景。</p>
+          <p>5.4 在以下情况下，本平台有权暂停或终止服务，且不承担任何责任：</p>
+          <ul>
+            <li>定期或紧急维护、升级</li>
+            <li>第三方服务（上游API提供商）出现故障</li>
+            <li>不可抗力事件（自然灾害、战争、罢工、政府行为等）</li>
+            <li>网络安全事件（DDoS攻击、黑客入侵等）</li>
+            <li>法律法规或政府机关的要求</li>
+            <li>运营方资源耗尽或无法继续维持运营</li>
+          </ul>
+          <p>5.5 本平台不对服务中断期间未能保存的数据或未完成的请求承担责任。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s6">
+          <h2>六、数据安全声明</h2>
+          <p>6.1 本平台采取合理的技术措施保护用户数据安全，包括加密传输、访问控制和定期安全审计。</p>
+          <p>6.2 用户理解并同意，互联网数据传输存在固有风险，本平台不对超出合理控制范围的数据安全事件承担赔偿责任。</p>
+          <p>6.3 本平台不会主动审查、记录或存储用户与AI模型的对话内容用于非服务目的。请求日志仅用于技术运维和性能优化。</p>
+          <p>6.4 本平台高度重视用户隐私保护，严格遵守《中华人民共和国个人信息保护法》，具体隐私实践请参阅本协议的第九条。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s7">
+          <h2>七、第三方链接</h2>
+          <p>7.1 本平台可能包含第三方网站或服务的链接。</p>
+          <p>7.2 这些第三方链接仅为用户便利提供，本平台不对其内容、可用性、安全性或准确性负责。</p>
+          <p>7.3 用户访问任何第三方链接应自行承担风险，并遵守该第三方网站的服务条款和隐私政策。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s8">
+          <h2>八、知识产权保护</h2>
+          <p>8.1 本平台的品牌标识、界面设计、源代码等知识产权归平台运营方所有，未经许可不得复制、修改或分发。</p>
+          <p>8.2 AI模型生成的内容的知识产权归属，依据相关法律法规和上游API服务商的服务条款确定。</p>
+          <p>8.3 用户使用本平台服务时，不得侵犯第三方知识产权，包括但不限于未经授权上传受版权保护的内容。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s9">
+          <h2>九、隐私保护</h2>
+          <p>9.1 本平台收集的信息范围：</p>
+          <ul>
+            <li>注册信息：用户名、邮箱地址（用于账号管理）</li>
+            <li>使用信息：API调用时间、模型选择、Token用量（用于运维统计）</li>
+            <li>技术信息：浏览器类型、IP地址（用于安全防护和滥用检测）</li>
+          </ul>
+          <p>9.2 本平台不会将用户信息出售、出租或与第三方共享，但以下情况除外：</p>
+          <ul>
+            <li>法律法规要求</li>
+            <li>保护平台合法权益（如诉讼需要）</li>
+            <li>获得用户明确同意</li>
+          </ul>
+          <p>9.3 用户有权查阅、更正和删除其个人信息，可通过QQ群联系管理员行使上述权利。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s10">
+          <h2>十、用户行为规范</h2>
+          <p>10.1 用户在使用本平台服务时，应遵守法律法规和公共秩序，不得从事以下行为：</p>
+          <ul>
+            <li>利用本平台从事违法犯罪活动</li>
+            <li>滥用本平台资源，包括但不限于恶意刷请求、并发压测、漏洞扫描等</li>
+            <li>注册多个账号以规避使用限制</li>
+            <li>对本平台进行反向工程、破解或攻击</li>
+            <li>散布违法信息、垃圾信息或进行网络骚扰</li>
+            <li>利用AI模型生成违反法律法规或社会公序良俗的内容</li>
+          </ul>
+          <p>10.2 对于违反本协议的用户，本平台有权采取以下措施：</p>
+          <ul>
+            <li>警告或暂停服务</li>
+            <li>限制账号使用权限</li>
+            <li>封禁账号及关联IP</li>
+            <li>在必要时向有关部门报告</li>
+          </ul>
+          <p>10.3 用户应文明使用本平台服务，尊重其他用户的合法权益，共同维护良好的网络环境。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s11">
+          <h2>十一、适用法律</h2>
+          <p>11.1 本协议的订立、执行、解释及争议解决均适用中华人民共和国法律。</p>
+          <p>11.2 因本协议引起的或与之相关的争议，双方应首先友好协商解决；协商不成的，提交平台运营方所在地有管辖权的人民法院诉讼解决。</p>
+          <p>11.3 本协议部分条款被认定为无效或不可执行的，不影响其他条款的效力。</p>
+        </div>
+
+        <div class="legal-section" id="legal-s12">
+          <h2>十二、协议更新</h2>
+          <p>12.1 本平台保留不时更新本协议的权利，更新后的协议将在平台上公布。</p>
+          <p>12.2 重大变更将通过平台公告、邮件或登录提示等方式通知用户。</p>
+          <p>12.3 用户继续使用本平台服务即视为接受更新后的协议。如不同意修改后的协议，用户应停止使用本平台服务。</p>
+        </div>
+
+        <div style="text-align:center;margin-top:40px;padding:20px;background:var(--bg-card);border:1px solid var(--border-light);border-radius:var(--radius-lg)">
+          <p style="color:var(--text-secondary);font-size:14px;margin-bottom:12px">如有疑问，请通过QQ群联系管理员</p>
+          <a href="#/qq-groups" class="btn primary">💬 联系管理员</a>
+        </div>
+      </div>
+    `;
+  }
+
+  /* ========== 模型状态页面 ========== */
+  /* ========== 模型状态页面（优化排版） ========== */
+  function _sortModels(models) {
+    // 排序规则：
+    // 1. 按状态分组：正常 > 警告 > 异常
+    // 2. 同组内：健康分高优先，延迟低优先，成功率高优先
+    const rank = { normal: 0, warning: 1, abnormal: 2 };
+    return [...models].sort((a, b) => {
+      const ra = rank[a.status] ?? 9, rb = rank[b.status] ?? 9;
+      if (ra !== rb) return ra - rb;
+      // 健康分降序
+      if ((b.health_score || 0) !== (a.health_score || 0))
+        return (b.health_score || 0) - (a.health_score || 0);
+      // 延迟升序
+      if ((a.avg_latency_ms || 0) !== (b.avg_latency_ms || 0))
+        return (a.avg_latency_ms || 0) - (b.avg_latency_ms || 0);
+      // 成功率降序
+      return (b.success_rate || 0) - (a.success_rate || 0);
+    });
+  }
+
+  function _renderModelCard(m) {
+    const statusCls = m.status === 'normal' ? 'active' : (m.status === 'warning' ? 'warning' : 'cooling');
+    const sr = m.success_rate || 0;
+    const latency = m.avg_latency_ms || 0;
+    const tb = m.total_buckets || 0;
+    const hasBuckets = tb > 0;
+    const c5xx = m.count_5xx_1h || 0;
+    const c429 = m.count_429_1h || 0;
+
+    // 推荐标记：正常 + 健康分>=90 + 延迟<2s + 成功率>=95%
+    const isRecommended = m.status === 'normal' && (m.health_score || 0) >= 90 && latency < 2000 && sr >= 95;
+
+    const borderColor = m.status === 'normal' ? 'var(--accent-success)' : m.status === 'warning' ? 'var(--accent-warning)' : 'var(--accent-danger)';
+
+    return '<div class="ms-card" style="border-left:3px solid ' + borderColor + '">' +
+      // 第一行：模型名（友好名称） + 状态标签 + 推荐 + 健康分
+      '<div class="ms-card-header">' +
+        '<div class="ms-card-title-group">' +
+          '<div style="display:flex;flex-direction:column">' +
+            '<span class="ms-model-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(m.display_name || m.model) + '</span>' +
+            '<span class="text-xs text-muted" style="margin-top:1px">' + escapeHtml(m.model) + ' <button class="btn xs" onclick="event.stopPropagation();copyToClipboard(\'' + escapeAttr(m.model) + '\');Toast.success(\'模型ID已复制\')" title="复制模型ID">' + Icons.copy(10) + '</button></span>' +
+          '</div>' +
+          (isRecommended ? '<span class="ms-badge ms-badge-rec">推荐</span>' : '') +
+          '<span class="tag ' + statusCls + '" style="font-size:9px;padding:1px 5px">' + m.status_label + '</span>' +
+        '</div>' +
+        '<div class="ms-health">' +
+          '<div class="ms-health-bar"><div class="ms-health-fill ' + (m.health_score >= 80 ? 's' : m.health_score >= 50 ? 'w' : 'd') + '" style="width:' + (m.health_score || 0) + '%"></div></div>' +
+          '<span class="ms-health-score">' + (m.health_score || 0) + '</span>' +
+        '</div>' +
+      '</div>' +
+      // 第二行：桶信息（如有） + 关键指标
+      '<div class="ms-bucket-row">' +
+        (hasBuckets ? '<span>密钥 ' + (m.healthy_buckets || 0) + '/' + tb + ' 健康</span><span class="sep">|</span>' : '') +
+        '<span>成功率 ' + '<strong style="color:' + (sr >= 95 ? 'var(--accent-success)' : sr >= 80 ? 'var(--accent-warning)' : 'var(--accent-danger)') + '">' + sr + '%</strong></span>' +
+        '<span class="sep">|</span>' +
+        '<span>延迟 ' + '<strong style="color:' + (latency < 3000 ? 'var(--accent-success)' : latency < 10000 ? 'var(--accent-warning)' : 'var(--accent-danger)') + '">' + (latency >= 1000 ? (latency/1000).toFixed(1)+'s' : Math.round(latency)+'ms') + '</strong></span>' +
+        '<span class="sep">|</span>' +
+        '<span>1h ' + Fmt.number(m.total_requests_1h || 0) + '</span>' +
+      '</div>' +
+      // 第三行：辅助指标
+      '<div class="ms-metrics">' +
+        '<div class="ms-metric"><span class="ms-metric-label">429</span><span class="ms-metric-val" style="color:' + (c429 > 0 ? 'var(--accent-warning)' : 'var(--text-muted)') + '">' + Fmt.number(c429) + '</span></div>' +
+        (c5xx > 0 ? '<div class="ms-metric"><span class="ms-metric-label">5xx</span><span class="ms-metric-val" style="color:var(--accent-danger)">' + Fmt.number(c5xx) + '</span></div>' : '') +
+        '<div class="ms-metric"><span class="ms-metric-label">今日Token</span><span class="ms-metric-val" style="color:var(--accent-info)">' + Fmt.number(m.today_tokens || 0) + '</span></div>' +
+        '<div class="ms-metric"><span class="ms-metric-label">活跃</span><span class="ms-metric-val">' + (m.active_users_1h || 0) + '</span></div>' +
+      '</div>' +
+    '</div>';
+  }
+
+  async function renderModelStatus() {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/model-status');
+    const content = document.getElementById('content-area');
+    content.innerHTML = '<div class="page"><div class="page-header"><h1 class="page-title">模型状态监控</h1><div id="ms-last-update" class="text-xs text-muted">加载中...</div></div><div id="ms-content"><div class="loader-wrap"><div class="loader-spinner">' + Icons.spinner(32) + '</div><div class="loader-text">加载模型状态数据...</div></div></div></div>';
+    try {
+      const data = await API.get('/api/user/models/status');
+      const rawModels = data.models || [];
+      const summary = data.summary || {};
+      const lu = document.getElementById('ms-last-update');
+      if (lu) lu.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+
+      // 降级警告
+      let degradedBanner = '';
+      if (data.degraded) {
+        degradedBanner = '<div class="ms-degraded"><span>' + Icons.alert(18) + '</span><span>数据源降级：' + escapeHtml(data.degraded) + '（无实时桶数据）</span></div>';
+      }
+
+      // 排序：正常优先，同组内健康分高+延迟低+成功率高优先
+      const sorted = _sortModels(rawModels);
+
+      // 统计摘要
+      const hasBucketData = sorted.some(m => m.total_buckets > 0);
+      const sc = [
+        { label: '正常模型', value: summary.normal || 0, cls: 'success' },
+        { label: '警告模型', value: summary.warning || 0, cls: 'warning' },
+        { label: '异常模型', value: summary.abnormal || 0, cls: 'danger' },
+        { label: '1h请求', value: Fmt.number(summary.total_requests_1h || 0), cls: 'accent' },
+      ];
+      if (hasBucketData) {
+        sc.push({ label: '健康密钥', value: sorted.reduce((s, m) => s + (m.healthy_buckets || 0), 0), cls: 'success' });
+        sc.push({ label: '冷却密钥', value: sorted.reduce((s, m) => s + (m.cooled_buckets || 0), 0), cls: 'warning' });
+      }
+      const summaryHtml = '<div class="ms-summary">' +
+        sc.map(c => '<div class="stat-card ' + c.cls + '"><div class="stat-label">' + c.label + '</div><div class="stat-value">' + c.value + '</div></div>').join('') +
+        '</div>';
+
+      // 按状态分组
+      const groups = { normal: [], warning: [], abnormal: [] };
+      sorted.forEach(m => { if (groups[m.status]) groups[m.status].push(m); });
+
+      const statusNames = { normal: '正常', warning: '警告', abnormal: '异常' };
+      const groupParts = [];
+      for (const st of ['normal', 'warning', 'abnormal']) {
+        const list = groups[st];
+        if (!list || list.length === 0) continue;
+        groupParts.push(
+          '<div class="ms-section">' +
+            '<div class="ms-section-header">' +
+              '<span class="ms-section-title"><span class="status-dot ' + st + '" style="vertical-align:middle;margin-right:6px"></span>' + statusNames[st] + '模型</span>' +
+              '<span class="ms-section-count">' + list.length + ' 个</span>' +
+            '</div>' +
+            '<div class="ms-card-list">' +
+              list.map(m => _renderModelCard(m)).join('') +
+            '</div>' +
+          '</div>'
+        );
+      }
+
+      const mc = document.getElementById('ms-content');
+      if (mc) mc.innerHTML = degradedBanner + summaryHtml + groupParts.join('');
+    } catch (e) {
+      const mc = document.getElementById('ms-content');
+      if (mc) mc.innerHTML = '<div class="empty-state"><div class="empty-icon">' + Icons.alert(36) + '</div><div>加载失败: ' + escapeHtml(e.message) + '</div></div>';
+    }
+  }
+
+  /* ========== 路由注册 ========== */
+  Router.register('/', renderHome);
+  Router.register('/login', renderLogin);
+  Router.register('/register', renderRegister);
+  Router.register('/reset-password', renderResetPassword);
+  Router.register('/models', renderModels);
+  Router.register('/docs', renderDocs);
+  Router.register('/qq-groups', renderQQGroups);
+  Router.register('/sponsor', renderSponsor);
+  Router.register('/legal/disclaimer', renderDisclaimer);
+  Router.register('/console', renderOverview);
+  Router.register('/console/keys', renderKeys);
+  Router.register('/console/chat', renderChat);
+  Router.register('/console/models', async () => {
+    if (!await ensureAuth()) return;
+    setSidebarVisible(true);
+    highlightNav('/console/models');
+    const content = document.getElementById('content-area');
+    content.innerHTML = `
+      <div class="page">
+        <div class="page-header">
+          <h1 class="page-title">模型列表</h1>
+          <div class="toolbar">
+            <div class="search-box">
+              <span class="search-icon">${Icons.search(16)}</span>
+              <input type="text" id="model-search" class="input" placeholder="搜索模型名称或ID...">
+            </div>
+            <select id="model-filter" class="select" style="width:auto;min-width:120px">
+              <option value="all">全部模型</option>
+              <option value="chat">对话模型</option>
+              <option value="vision">视觉模型</option>
+              <option value="embed">嵌入模型</option>
+              <option value="code">代码模型</option>
+              <option value="safety">安全模型</option>
+            </select>
+          </div>
+        </div>
+        <div id="models-list"></div>
+      </div>
+    `;
+    Loader.show('#models-list', '加载模型列表中');
+    try {
+      const models = await API.get('/api/chat/models');
+      // v10.0: 缓存模型名称映射供其他页面使用
+      window._modelNames = models || [];
+      renderModelsList(models || []);
+      const searchInput = document.getElementById('model-search');
+      const filterSelect = document.getElementById('model-filter');
+      const applyFilters = () => {
+        const keyword = searchInput.value.toLowerCase();
+        const filter = filterSelect.value;
+        const filtered = (models || []).filter(m => {
+          const matchKeyword = !keyword || m.id.toLowerCase().includes(keyword) || (m.display_name || '').toLowerCase().includes(keyword);
+          const caps = m.capabilities || [];
+          let matchFilter = true;
+          if (filter === 'chat') matchFilter = caps.includes('推理') && !caps.includes('嵌入') && !caps.includes('安全');
+          else if (filter === 'vision') matchFilter = caps.includes('视觉');
+          else if (filter === 'embed') matchFilter = caps.includes('嵌入');
+          else if (filter === 'code') matchFilter = caps.includes('代码');
+          else if (filter === 'safety') matchFilter = caps.includes('安全');
+          return matchKeyword && matchFilter;
+        });
+        renderModelsList(filtered);
+      };
+      searchInput.addEventListener('input', debounce(applyFilters, 200));
+      filterSelect.addEventListener('change', applyFilters);
+    } catch (err) {
+      const _ml3 = document.getElementById('models-list'); if (_ml3) _ml3.innerHTML = emptyState('加载失败：' + err.message, 'error');
+    }
+  });
+  Router.register('/console/stats', renderStats);
+  Router.register('/console/docs', renderConsoleDocs);
+  Router.register('/console/settings', renderSettings);
+  Router.register('/console/logs', renderLogs);
+  Router.register('/console/feedback', renderFeedback);
+  Router.register('/console/model-status', renderModelStatus);
+
+  /* ========== 初始化 ========== */
+  document.addEventListener('DOMContentLoaded', async () => {
+    Theme.init();
+    renderNavbarIcons();
+    renderSidebarIcons();
+    // 检查登录状态
+    await Auth.fetchUser();
+    renderNavbarIcons();
+    Router.init();
+  });
+
+  // 暴露关键函数到全局供HTML调用
+  window.renderOverview = renderOverview;
+  window.renderKeys = renderKeys;
+  window.renderChat = renderChat;
+  window.renderStats = renderStats;
+  window.renderDocs = renderDocs;
+  window.renderConsoleDocs = renderConsoleDocs;
+  window.renderSettings = renderSettings;
+  window.renderLogs = renderLogs;
+  window.showCreateKeyModal = showCreateKeyModal;
+  window.deleteKey = deleteKey;
+  window.toggleKeyVisibility = toggleKeyVisibility;
+  window.copyFullKey = copyFullKey;
+  window.toggleKeyStatus = toggleKeyStatus;
+  window.newChat = newChat;
+  window.loadChat = loadChat;
+  window.deleteChat = deleteChat;
+  window.sendMessage = sendMessage;
+  window.stopGeneration = stopGeneration;
+  window.toggleWebSearch = toggleWebSearch;
+  window.toggleReasoning = toggleReasoning;
+  window.showLogDetail = showLogDetail;
+  window.renderModels = renderModels;
+  </script>
+</body>
+</html>

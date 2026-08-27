@@ -1,0 +1,1396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AQUA Gateway v10.0 管理控制台</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root { --bg-deep: #0b0d11; --bg-surface: #12141a; --bg-card: #181a20; --border: #22252c; --primary: #4099ff; --primary-dark: #2770d0; --text: #e0e2e8; --text-sec: #8a8f9a; --text-dim: #5a5e68; --success: #34c759; --warning: #ff9500; --danger: #ff3b30; --info: #5ac8fa; --radius: 8px; --radius-sm: 4px; }
+html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif; background: var(--bg-deep); color: var(--text); font-size: 14px; line-height: 1.5; }
+a { color: var(--primary); text-decoration: none; }
+input, select, textarea, button { font-family: inherit; font-size: inherit; }
+
+/* Layout */
+.app { display: flex; height: 100%; overflow: hidden; }
+.sidebar { width: 200px; min-width: 200px; background: var(--bg-surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow-y: auto; }
+.sidebar-title { padding: 20px 16px 12px; font-size: 16px; font-weight: 700; color: var(--primary); letter-spacing: 1px; }
+.sidebar-nav { flex: 1; padding: 4px 8px; }
+.sidebar-nav .nav-item { display: block; padding: 8px 12px; border-radius: var(--radius-sm); cursor: pointer; color: var(--text-sec); transition: all .15s; font-size: 13px; margin-bottom: 2px; }
+.sidebar-nav .nav-item:hover { background: var(--bg-card); color: var(--text); }
+.sidebar-nav .nav-item.active { background: rgba(64,153,255,.12); color: var(--primary); }
+.main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+.main-header { padding: 16px 24px; background: var(--bg-surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; min-height: 56px; }
+.main-header h2 { font-size: 18px; font-weight: 600; }
+.main-header .header-actions { display: flex; gap: 8px; align-items: center; }
+.content { flex: 1; padding: 20px 24px; overflow-y: auto; }
+.hamburger { display: none; background: none; border: none; color: var(--text); font-size: 22px; cursor: pointer; padding: 4px; }
+
+/* Mobile tabs */
+.mobile-tabs { display: none; background: var(--bg-surface); border-top: 1px solid var(--border); overflow-x: auto; }
+.mobile-tabs .tab-item { flex: 1; min-width: 60px; text-align: center; padding: 8px 4px; font-size: 11px; cursor: pointer; color: var(--text-sec); transition: all .15s; white-space: nowrap; }
+.mobile-tabs .tab-item.active { color: var(--primary); }
+
+/* Overlay */
+.overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 99; }
+.overlay.show { display: block; }
+
+/* Cards */
+.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.card + .card { margin-top: 12px; }
+
+/* Stat grid */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.stat-card .stat-label { font-size: 12px; color: var(--text-sec); margin-bottom: 4px; }
+.stat-card .stat-value { font-size: 22px; font-weight: 700; color: var(--text); }
+.stat-card .stat-sub { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+/* Badges */
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 500; }
+.badge-green { background: rgba(52,199,89,.15); color: var(--success); }
+.badge-red { background: rgba(255,59,48,.15); color: var(--danger); }
+.badge-yellow { background: rgba(255,149,0,.15); color: var(--warning); }
+.badge-blue { background: rgba(90,200,250,.15); color: var(--info); }
+.badge-gray { background: rgba(138,143,154,.15); color: var(--text-sec); }
+
+/* Buttons */
+.btn { display: inline-flex; align-items: center; gap: 4px; padding: 7px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-card); color: var(--text); cursor: pointer; font-size: 13px; transition: all .15s; }
+.btn:hover { border-color: var(--text-dim); }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-dark); border-color: var(--primary-dark); }
+.btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-warning { background: var(--warning); border-color: var(--warning); color: #fff; }
+
+/* Table */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+th { color: var(--text-sec); font-weight: 500; font-size: 12px; white-space: nowrap; }
+tr:hover td { background: rgba(255,255,255,.02); }
+
+/* Form */
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 13px; color: var(--text-sec); margin-bottom: 4px; }
+.form-group input, .form-group select, .form-group textarea { width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-surface); color: var(--text); outline: none; transition: border .15s; }
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { border-color: var(--primary); }
+
+/* Toast */
+.toast-container { position: fixed; top: 16px; right: 16px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; }
+.toast { padding: 12px 20px; border-radius: var(--radius); background: var(--bg-card); border: 1px solid var(--border); color: var(--text); font-size: 13px; box-shadow: 0 8px 24px rgba(0,0,0,.4); animation: toastIn .25s ease; max-width: 360px; }
+.toast-success { border-left: 3px solid var(--success); }
+.toast-error { border-left: 3px solid var(--danger); }
+.toast-info { border-left: 3px solid var(--info); }
+@keyframes toastIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+@keyframes toastOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(100%); opacity: 0; } }
+
+/* Modal */
+.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 200; align-items: center; justify-content: center; }
+.modal-overlay.show { display: flex; }
+.modal { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); min-width: 380px; max-width: 90vw; max-height: 85vh; overflow-y: auto; box-shadow: 0 16px 48px rgba(0,0,0,.5); }
+.modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.modal-header h3 { font-size: 16px; font-weight: 600; }
+.modal-close { background: none; border: none; color: var(--text-sec); font-size: 20px; cursor: pointer; padding: 0 4px; }
+.modal-body { padding: 20px; }
+.modal-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Loading */
+.spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .6s linear infinite; margin: 40px auto; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Pagination */
+.pagination { display: flex; align-items: center; gap: 8px; justify-content: center; padding: 16px 0; }
+.pagination .page-info { font-size: 13px; color: var(--text-sec); }
+.pagination .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Chart bars */
+.chart-bars { display: flex; align-items: flex-end; gap: 6px; height: 120px; padding: 8px 0; }
+.chart-bar { flex: 1; background: var(--primary); border-radius: 3px 3px 0 0; min-height: 4px; transition: height .3s; position: relative; }
+.chart-bar:hover { opacity: .8; }
+.chart-bar-label { position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--text-dim); white-space: nowrap; }
+.chart-bar-val { position: absolute; top: -16px; left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--text-sec); white-space: nowrap; }
+
+/* Section */
+.section-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; margin-top: 20px; }
+.section-title:first-child { margin-top: 0; }
+
+/* Flex helpers */
+.flex { display: flex; }
+.flex-wrap { flex-wrap: wrap; }
+.gap-8 { gap: 8px; }
+.gap-12 { gap: 12px; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.mb-8 { margin-bottom: 8px; }
+.mb-12 { margin-bottom: 12px; }
+.mt-12 { margin-top: 12px; }
+.text-sec { color: var(--text-sec); }
+.text-sm { font-size: 12px; }
+.text-xs { font-size: 11px; }
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Login page */
+.login-wrap { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 20px; }
+.login-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 32px; width: 100%; max-width: 360px; }
+.login-card h2 { text-align: center; margin-bottom: 24px; color: var(--primary); font-size: 20px; }
+.login-card .form-group { margin-bottom: 18px; }
+.login-card .btn { width: 100%; justify-content: center; padding: 10px; }
+
+/* Responsive */
+@media (max-width: 1024px) {
+  .sidebar { position: fixed; left: -200px; top: 0; bottom: 0; z-index: 100; transition: left .25s; }
+  .sidebar.open { left: 0; }
+  .hamburger { display: block; }
+  .content { padding: 16px; }
+  .main-header { padding: 12px 16px; }
+}
+@media (max-width: 768px) {
+  .mobile-tabs { display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 50; }
+  .main { padding-bottom: 48px; }
+  .sidebar { display: none; }
+  .sidebar.open { display: flex; left: 0; width: 200px; }
+  .content { padding: 12px; }
+  .main-header { padding: 10px 12px; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .modal { min-width: auto; width: 92vw; }
+  .hamburger { display: block; }
+}
+</style>
+</head>
+<body>
+
+<div class="app" id="app">
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-title">网关管理</div>
+    <div class="sidebar-nav" id="sidebarNav"></div>
+  </div>
+  <div class="main">
+    <div class="main-header">
+      <div class="flex items-center gap-8">
+        <button class="hamburger" id="hamburgerBtn">&#9776;</button>
+        <h2 id="pageTitle">仪表盘</h2>
+      </div>
+      <div class="header-actions" id="headerActions"></div>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+  <div class="mobile-tabs" id="mobileTabs"></div>
+</div>
+<div class="overlay" id="overlay"></div>
+<div class="modal-overlay" id="modalOverlay"><div class="modal" id="modalContent"></div></div>
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+(function(){
+'use strict';
+
+const A = '/gw/admin';
+const S = { token: localStorage.getItem('t'), pg: 'dash' };
+
+const PN = ['dash','keys','clients','buckets','logs','algo','monitor','config','tokens','errors','commercial'];
+const PT = { dash:'仪表盘', keys:'上游密钥', clients:'下游客户', buckets:'桶监控', logs:'请求日志', algo:'算法引擎', monitor:'系统监控', config:'系统配置', tokens:'平台令牌', errors:'错误码', commercial:'商用检测' };
+const PL = { dash:'Dashboard', keys:'Upstream Keys', clients:'Downstream Clients', buckets:'Bucket Monitor', logs:'Request Logs', algo:'Algorithm Engine', monitor:'System Monitor', config:'System Config', tokens:'Platform Tokens', errors:'Error Codes', commercial:'Commercial Detection' };
+
+const ALGO_SUB = [
+  {id:'algo1',name:'滑动窗口'},
+  {id:'algo2',name:'软繁忙标记器'},
+  {id:'algo3',name:'自适应阈值'},
+  {id:'algo4',name:'冷却时长计算'},
+  {id:'algo5',name:'客户端并发'},
+  {id:'algo6',name:'客户端突发率'},
+  {id:'algo7',name:'日用量'},
+  {id:'algo8',name:'5xx退避'},
+  {id:'algo9',name:'区域故障隔离'},
+  {id:'algo10',name:'全局健康度'},
+  {id:'algo11',name:'池化权重'},
+  {id:'algo12',name:'自适应负载'},
+  {id:'algo13',name:'冷密钥预热'},
+  {id:'algo14',name:'异常自愈'},
+  {id:'algo15',name:'趋势感知均衡(Trae)'},
+  {id:'algo16',name:'龙虾调度(Lobster)'},
+  {id:'algo17',name:'严格公平调度'}
+];
+
+const R = {};
+
+function gc() { return document.getElementById('content'); }
+
+/* --- Toast --- */
+function toast(msg, type='info') {
+  const c = document.getElementById('toastContainer');
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => { el.style.animation = 'toastOut .25s ease forwards'; setTimeout(() => el.remove(), 250); }, 3000);
+}
+
+/* --- Modal --- */
+function showModal(html) {
+  const mo = document.getElementById('modalOverlay');
+  document.getElementById('modalContent').innerHTML = html;
+  mo.classList.add('show');
+}
+function closeModal() {
+  document.getElementById('modalOverlay').classList.remove('show');
+}
+document.getElementById('modalOverlay').addEventListener('click', function(e) { if (e.target === this) closeModal(); });
+
+/* --- API --- */
+async function api(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (S.token) headers['Authorization'] = 'Bearer ' + S.token;
+  const resp = await fetch(A + path, { ...options, headers });
+  if (resp.status === 401) { S.token = ''; localStorage.removeItem('t'); render(); throw new Error('unauth'); }
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.detail?.message || data.message || '请求失败');
+  return data;
+}
+
+/* --- Spinner --- */
+function spinner() { return '<div class="spinner"></div>'; }
+
+/* --- Badge --- */
+function badge(text, color) { return '<span class="badge badge-' + color + '">' + text + '</span>'; }
+
+/* --- Pagination --- */
+function pagination(page, total, totalPages, cb) {
+  const p = document.createElement('div');
+  p.className = 'pagination';
+  p.innerHTML = '<button class="btn btn-sm" data-page="' + (page-1) + '"' + (page<=1?' disabled':'') + '>上一页</button><span class="page-info">第 ' + page + '/' + totalPages + ' 页 (共 ' + total + ' 条)</span><button class="btn btn-sm" data-page="' + (page+1) + '"' + (page>=totalPages?' disabled':'') + '>下一页</button>';
+  p.querySelectorAll('button').forEach(b => { b.addEventListener('click', function() { const np = parseInt(this.dataset.page); if (np>0 && np<=totalPages) cb(np); }); });
+  return p;
+}
+
+/* --- Navigation --- */
+function nav(p) {
+  if (!p) p = 'dash';
+  if (!PN.includes(p) && !ALGO_SUB.find(s => s.id === p)) p = 'dash';
+  S.pg = p;
+  render();
+}
+
+function renderNav() {
+  const sidebar = document.getElementById('sidebarNav');
+  const mobile = document.getElementById('mobileTabs');
+  sidebar.innerHTML = '';
+  mobile.innerHTML = '';
+  PN.forEach(p => {
+    const n = document.createElement('div');
+    n.className = 'nav-item' + (p === S.pg ? ' active' : '');
+    n.textContent = PT[p];
+    n.dataset.page = p;
+    n.addEventListener('click', function() { nav(this.dataset.page); closeSidebar(); });
+    sidebar.appendChild(n);
+    if (p === 'algo') {
+      // Add algorithm sub-entries as indented nav items
+      ALGO_SUB.forEach(sub => {
+        const sn = document.createElement('div');
+        sn.className = 'nav-item' + (S.pg === sub.id ? ' active' : '');
+        sn.textContent = '  └ ' + sub.name;
+        sn.style.paddingLeft = '24px';
+        sn.style.fontSize = '12px';
+        sn.dataset.page = sub.id;
+        sn.addEventListener('click', function() { nav(this.dataset.page); closeSidebar(); });
+        sidebar.appendChild(sn);
+      });
+    }
+    const mt = document.createElement('div');
+    mt.className = 'tab-item' + (p === S.pg ? ' active' : '');
+    mt.textContent = PT[p];
+    mt.dataset.page = p;
+    mt.addEventListener('click', function() { nav(this.dataset.page); });
+    mobile.appendChild(mt);
+  });
+  const algoSubForTitle = ALGO_SUB.find(s => s.id === S.pg);
+  document.getElementById('pageTitle').textContent = PT[S.pg] || (algoSubForTitle ? '算法详情: ' + algoSubForTitle.name : '') || '网关管理';
+}
+
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('overlay').classList.remove('show');
+}
+
+document.getElementById('hamburgerBtn').addEventListener('click', function() {
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('overlay').classList.toggle('show');
+});
+document.getElementById('overlay').addEventListener('click', closeSidebar);
+
+/* --- Render --- */
+function render() {
+  renderNav();
+  const c = gc();
+  c.innerHTML = '';
+  if (!S.token) {
+    R.login();
+  } else {
+    const algoSub = ALGO_SUB.find(s => s.id === S.pg);
+    if (algoSub) {
+      const num = parseInt(algoSub.id.replace('algo', ''));
+      algoDetail(num);
+    } else if (R[S.pg]) {
+      R[S.pg]();
+    } else {
+      R.dash();
+    }
+  }
+}
+
+/* ================================================================ */
+/*  LOGIN                                                            */
+/* ================================================================ */
+R.login = function() {
+  const c = gc();
+  document.getElementById('headerActions').innerHTML = '';
+  c.innerHTML = '<div class="login-wrap"><div class="login-card"><h2>网关管理</h2><div class="form-group"><label>管理密码</label><input type="password" id="loginPwd" placeholder="请输入密码"></div><button class="btn btn-primary" id="loginBtn">登录</button></div></div>';
+  document.getElementById('loginBtn').addEventListener('click', async function() {
+    const pwd = document.getElementById('loginPwd').value;
+    if (!pwd) { toast('请输入密码', 'error'); return; }
+    try {
+      const d = await api('/login', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+      S.token = d.token || d.access_token;
+      localStorage.setItem('t', S.token);
+      toast('登录成功', 'success');
+      render();
+    } catch(e) {
+      toast(e.message || '登录失败', 'error');
+    }
+  });
+  document.getElementById('loginPwd').addEventListener('keydown', function(e) { if (e.key === 'Enter') document.getElementById('loginBtn').click(); });
+};
+
+/* ================================================================ */
+/*  DASHBOARD                                                        */
+/* ================================================================ */
+R.dash = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  document.getElementById('headerActions').innerHTML = '';
+  try {
+    const d = await api('/dashboard');
+    c.innerHTML = '';
+    const t = d.today || {};
+    const h = d.history || {};
+    const a = d.active || {};
+    const tr = d.trend_7d || [];
+    const md = d.model_distribution || [];
+    const ss = d.scheduler || {};
+    const s = document.createElement('div');
+    s.className = 'stat-grid';
+    const items = [
+      { label: '今日请求', val: (t.total_requests ?? '-').toLocaleString() },
+      { label: '成功率', val: (t.success_rate ?? '-') + '%' },
+      { label: '平均延迟', val: formatLatency(t.avg_latency_ms) },
+      { label: '活跃密钥', val: (a.upstream_keys ?? '-').toLocaleString() },
+      { label: 'Token用量', val: ((t.total_tokens ?? 0) / 1e6).toFixed(1) + 'M' },
+      { label: '429次数', val: (t.count_429 ?? '-').toLocaleString() },
+      { label: '5xx次数', val: (t.count_5xx ?? '-').toLocaleString() },
+    ];
+    items.forEach(i => {
+      const card = document.createElement('div');
+      card.className = 'stat-card';
+      card.innerHTML = '<div class="stat-label">' + i.label + '</div><div class="stat-value">' + i.val + '</div>';
+      s.appendChild(card);
+    });
+    c.appendChild(s);
+
+    // 7天趋势
+    if (tr.length) {
+      const sec = document.createElement('div');
+      sec.innerHTML = '<div class="section-title">7天请求趋势</div>';
+      const bars = document.createElement('div');
+      bars.className = 'chart-bars';
+      const maxV = Math.max(...tr.map(i => i.requests || 0), 1);
+      tr.forEach(t => {
+        const v = t.requests || 0;
+        const bar = document.createElement('div');
+        bar.className = 'chart-bar';
+        bar.style.height = Math.max(4, (v/maxV)*100) + 'px';
+        bar.innerHTML = '<div class="chart-bar-val">' + v + '</div><div class="chart-bar-label">' + (t.date || '').slice(5) + '</div>';
+        bars.appendChild(bar);
+      });
+      sec.appendChild(bars);
+      c.appendChild(sec);
+    }
+
+    // Top模型
+    if (md.length) {
+      const sec = document.createElement('div');
+      sec.innerHTML = '<div class="section-title">Top模型分布</div><div class="table-wrap"><table><thead><tr><th>模型</th><th>请求数</th></tr></thead><tbody>' + md.map(m => '<tr><td>' + (m.model || '-') + '</td><td>' + (m.count ?? 0) + '</td></tr>').join('') + '</tbody></table></div>';
+      c.appendChild(sec);
+    }
+
+    // 调度器状态
+    const sec = document.createElement('div');
+    sec.innerHTML = '<div class="section-title">调度器状态</div><div class="stat-grid"><div class="stat-card"><div class="stat-label">健康密钥数</div><div class="stat-value">' + (ss.healthy_key_count ?? '-') + '</div></div><div class="stat-card"><div class="stat-label">降级模式</div><div class="stat-value">' + (ss.degraded_mode ? badge('降级中','red') : badge('正常','green')) + '</div></div><div class="stat-card"><div class="stat-label">在途请求</div><div class="stat-value">' + (ss.inflight_requests ?? 0) + '</div></div><div class="stat-card"><div class="stat-label">内存压力</div><div class="stat-value">' + (ss.memory_pressure != null ? (ss.memory_pressure*100).toFixed(0) + '%' : '-') + '</div></div></div>';
+    c.appendChild(sec);
+  } catch(e) {
+    c.innerHTML = '<div class="card"><div class="text-sec">加载失败: ' + e.message + '</div></div>';
+  }
+};
+
+/* ================================================================ */
+/*  KEYS (上游密钥)                                                   */
+/* ================================================================ */
+R.keys = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  const ha = document.getElementById('headerActions');
+  ha.innerHTML = '<button class="btn btn-primary btn-sm" id="createKeyBtn">+ 创建密钥</button>';
+  try {
+    const list = await api('/upstreams');
+    c.innerHTML = '';
+    if (!list.length) { c.innerHTML = '<div class="card text-sec">暂无上游密钥</div>'; return; }
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap';
+    let html = '<table><thead><tr><th>名称</th><th>Provider</th><th>权重</th><th>RPM</th><th>成功率</th><th>429</th><th>5xx</th><th>健康分</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    list.forEach(k => {
+      const isFrozen = (k.cooled_buckets ?? 0) > 0 || k.cooldown_remaining > 0;
+      const st = isFrozen ? badge('冷却中','yellow') : badge('正常','green');
+      const sc = k.avg_health ?? '-';
+      const rpm = k.current_rpm ?? '-';
+      html += '<tr><td>' + (k.name || '-') + '</td><td>' + (k.provider || '-') + '</td><td>' + (k.weight ?? '-') + '</td><td>' + rpm + '</td><td>' + (k.success_rate ?? '-') + '%</td><td>' + (k.total_429 ?? 0) + '</td><td>' + (k.total_5xx ?? 0) + '</td><td>' + sc + '</td><td>' + st + '</td><td class="flex gap-8">';
+      html += '<button class="btn btn-sm" data-id="' + k.id + '" data-action="edit">编辑</button>';
+      html += '<button class="btn btn-sm btn-danger" data-id="' + k.id + '" data-action="delete">删除</button>';
+      if (isFrozen) html += '<button class="btn btn-sm btn-warning" data-id="' + k.id + '" data-action="unfreeze">解冻</button>';
+      html += '</td></tr>';
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    c.appendChild(wrap);
+
+    c.querySelectorAll('[data-action="edit"]').forEach(b => b.addEventListener('click', function() { editKey(this.dataset.id, list); }));
+    c.querySelectorAll('[data-action="delete"]').forEach(b => b.addEventListener('click', function() { deleteKey(this.dataset.id); }));
+    c.querySelectorAll('[data-action="unfreeze"]').forEach(b => b.addEventListener('click', function() { unfreezeKey(this.dataset.id); }));
+
+    document.getElementById('createKeyBtn').addEventListener('click', function() { createKey(); });
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+function createKey() {
+  showModal('<div class="modal-header"><h3>创建上游密钥</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><div class="form-group"><label>名称</label><input id="f_name" placeholder="名称"></div><div class="form-group"><label>API Key</label><input id="f_api_key" placeholder="API密钥"></div><div class="form-group"><label>Provider</label><input id="f_provider" placeholder="provider"></div><div class="form-group"><label>权重</label><input id="f_weight" type="number" value="1"></div><div class="form-group"><label>RPM限制</label><input id="f_rpm" type="number" value="60"></div><div class="form-group"><label>切换阈值</label><input id="f_switch" type="number" value="3"></div></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-primary" id="saveKeyBtn">创建</button></div>');
+  document.getElementById('saveKeyBtn').addEventListener('click', async function() {
+    const body = {
+      name: document.getElementById('f_name').value,
+      api_key: document.getElementById('f_api_key').value,
+      provider: document.getElementById('f_provider').value,
+      weight: parseInt(document.getElementById('f_weight').value) || 1,
+      rpm_limit: parseInt(document.getElementById('f_rpm').value) || 60,
+      switch_threshold: parseInt(document.getElementById('f_switch').value) || 3
+    };
+    if (!body.name || !body.api_key) { toast('名称和API Key不能为空', 'error'); return; }
+    try {
+      await api('/upstreams', { method: 'POST', body: JSON.stringify(body) });
+      closeModal(); toast('创建成功', 'success'); R.keys();
+    } catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+function editKey(id, list) {
+  const k = list.find(i => String(i.id) === String(id)) || {};
+  showModal('<div class="modal-header"><h3>编辑上游密钥</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><div class="form-group"><label>名称</label><input id="f_name" value="' + (k.name||'') + '"></div><div class="form-group"><label>API Key</label><input id="f_api_key" value="' + (k.api_key||k.apiKey||'') + '"></div><div class="form-group"><label>Provider</label><input id="f_provider" value="' + (k.provider||'') + '"></div><div class="form-group"><label>权重</label><input id="f_weight" type="number" value="' + (k.weight??1) + '"></div><div class="form-group"><label>RPM限制</label><input id="f_rpm" type="number" value="' + (k.rpm_limit??k.rpm??60) + '"></div><div class="form-group"><label>切换阈值</label><input id="f_switch" type="number" value="' + (k.switch_threshold??3) + '"></div></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-primary" id="saveKeyBtn">保存</button></div>');
+  document.getElementById('saveKeyBtn').addEventListener('click', async function() {
+    const body = {
+      name: document.getElementById('f_name').value,
+      api_key: document.getElementById('f_api_key').value,
+      provider: document.getElementById('f_provider').value,
+      weight: parseInt(document.getElementById('f_weight').value) || 1,
+      rpm_limit: parseInt(document.getElementById('f_rpm').value) || 60,
+      switch_threshold: parseInt(document.getElementById('f_switch').value) || 3
+    };
+    try {
+      await api('/upstreams/' + id, { method: 'PUT', body: JSON.stringify(body) });
+      closeModal(); toast('修改成功', 'success'); R.keys();
+    } catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+function deleteKey(id) {
+  showModal('<div class="modal-header"><h3>确认删除</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><p>确定要删除此上游密钥吗？此操作不可撤销。</p></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-danger" id="confirmDeleteKey">删除</button></div>');
+  document.getElementById('confirmDeleteKey').addEventListener('click', async function() {
+    try { await api('/upstreams/' + id, { method: 'DELETE' }); closeModal(); toast('删除成功', 'success'); R.keys(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+function unfreezeKey(id) {
+  showModal('<div class="modal-header"><h3>确认解冻</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><p>确定要解冻此上游密钥吗？</p></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-warning" id="confirmUnfreeze">解冻</button></div>');
+  document.getElementById('confirmUnfreeze').addEventListener('click', async function() {
+    try { await api('/upstreams/' + id + '/unfreeze', { method: 'POST' }); closeModal(); toast('解冻成功', 'success'); R.keys(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+/* ================================================================ */
+/*  CLIENTS (下游客户)                                                */
+/* ================================================================ */
+R.clients = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  const ha = document.getElementById('headerActions');
+  ha.innerHTML = '<button class="btn btn-primary btn-sm" id="createClientBtn">+ 创建客户</button>';
+  try {
+    const list = await api('/clients');
+    c.innerHTML = '';
+    if (!list.length) { c.innerHTML = '<div class="card text-sec">暂无下游客户</div>'; return; }
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap';
+    let html = '<table><thead><tr><th>ID</th><th>名称</th><th>用户类型</th><th>密钥数</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    list.forEach(cl => {
+      const st = cl.status === 'active' || cl.status === undefined ? badge('活跃','green') : badge('停用','gray');
+      const ut = cl.user_type || cl.userType || '-';
+      html += '<tr><td>' + (cl.display_name || cl.name || cl.id || '-') + '</td><td>' + (cl.name||'-') + '</td><td>' + ut + '</td><td>' + (cl.key_count ?? cl.keyCount ?? '-') + '</td><td>' + st + '</td><td class="flex gap-8">';
+      html += '<button class="btn btn-sm" data-id="' + cl.id + '" data-action="edit">编辑</button>';
+      html += '<button class="btn btn-sm btn-danger" data-id="' + cl.id + '" data-action="delete">删除</button>';
+      html += '<button class="btn btn-sm" data-id="' + cl.id + '" data-action="keys">密钥</button>';
+      html += '<button class="btn btn-sm" data-id="' + cl.id + '" data-action="usage">用量</button>';
+      html += '</td></tr>';
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    c.appendChild(wrap);
+
+    c.querySelectorAll('[data-action="edit"]').forEach(b => b.addEventListener('click', function() { editClient(this.dataset.id, list); }));
+    c.querySelectorAll('[data-action="delete"]').forEach(b => b.addEventListener('click', function() { deleteClient(this.dataset.id); }));
+    c.querySelectorAll('[data-action="keys"]').forEach(b => b.addEventListener('click', function() { manageClientKeys(this.dataset.id); }));
+    c.querySelectorAll('[data-action="usage"]').forEach(b => b.addEventListener('click', function() { clientUsage(this.dataset.id); }));
+
+    document.getElementById('createClientBtn').addEventListener('click', function() { createClient(); });
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+function createClient() {
+  showModal('<div class="modal-header"><h3>创建下游客户</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><div class="form-group"><label>名称</label><input id="f_name" placeholder="客户名称"></div><div class="form-group"><label>用户类型</label><select id="f_utype"><option value="new">new</option><option value="old">old</option></select></div></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-primary" id="saveClientBtn">创建</button></div>');
+  document.getElementById('saveClientBtn').addEventListener('click', async function() {
+    const body = { name: document.getElementById('f_name').value, user_type: document.getElementById('f_utype').value };
+    if (!body.name) { toast('名称不能为空', 'error'); return; }
+    try { await api('/clients', { method: 'POST', body: JSON.stringify(body) }); closeModal(); toast('创建成功', 'success'); R.clients(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+function editClient(id, list) {
+  const cl = list.find(i => String(i.id) === String(id)) || {};
+  showModal('<div class="modal-header"><h3>编辑客户</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><div class="form-group"><label>名称</label><input id="f_name" value="' + (cl.name||'') + '"></div><div class="form-group"><label>用户类型</label><select id="f_utype"><option value="new"' + ((cl.user_type||cl.userType)==='new'?' selected':'') + '>new</option><option value="old"' + ((cl.user_type||cl.userType)==='old'?' selected':'') + '>old</option></select></div><div class="form-group"><label>状态</label><select id="f_status"><option value="active"' + ((cl.status||'active')==='active'?' selected':'') + '>active</option><option value="inactive"' + ((cl.status||'active')==='inactive'?' selected':'') + '>inactive</option></select></div></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-primary" id="saveClientBtn">保存</button></div>');
+  document.getElementById('saveClientBtn').addEventListener('click', async function() {
+    const body = { name: document.getElementById('f_name').value, user_type: document.getElementById('f_utype').value, status: document.getElementById('f_status').value };
+    try { await api('/clients/' + id, { method: 'PUT', body: JSON.stringify(body) }); closeModal(); toast('修改成功', 'success'); R.clients(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+function deleteClient(id) {
+  showModal('<div class="modal-header"><h3>确认删除</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><p>确定要删除此客户吗？此操作不可撤销。</p></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-danger" id="confirmDeleteClient">删除</button></div>');
+  document.getElementById('confirmDeleteClient').addEventListener('click', async function() {
+    try { await api('/clients/' + id, { method: 'DELETE' }); closeModal(); toast('删除成功', 'success'); R.clients(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+function manageClientKeys(id) {
+  (async function() {
+    try {
+      const keys = await api('/clients/' + id + '/keys');
+      let html = '<div class="modal-header"><h3>密钥管理</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body">';
+      if (keys.length) {
+        html += '<div class="table-wrap"><table><thead><tr><th>密钥</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+        keys.forEach(k => {
+          html += '<tr><td class="text-sm">' + (k.key||k.api_key||k.id||'') + '</td><td>' + (k.status==='active'?badge('活跃','green'):badge('停用','gray')) + '</td><td><button class="btn btn-sm btn-danger" data-kid="' + (k.id||k.key_id) + '" data-cid="' + id + '" onclick="deleteClientKey(\'' + id + '\',\'' + (k.id||k.key_id) + '\')">删除</button></td></tr>';
+        });
+        html += '</tbody></table></div>';
+      } else {
+        html += '<p class="text-sec">暂无密钥</p>';
+      }
+      html += '<div class="mt-12"><div class="form-group"><label>创建新密钥</label><input id="newKeyName" placeholder="密钥名称(可选)"></div><button class="btn btn-primary btn-sm" id="createClientKeyBtn">创建密钥</button></div>';
+      html += '</div>';
+      showModal(html);
+      document.getElementById('createClientKeyBtn').addEventListener('click', async function() {
+        const nm = document.getElementById('newKeyName').value;
+        try { await api('/clients/' + id + '/keys', { method: 'POST', body: JSON.stringify({ name: nm || undefined }) }); toast('创建成功', 'success'); closeModal(); manageClientKeys(id); }
+        catch(e) { toast(e.message, 'error'); }
+      });
+    } catch(e) { toast(e.message, 'error'); }
+  })();
+}
+
+function deleteClientKey(cid, kid) {
+  showModal('<div class="modal-header"><h3>确认删除</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><p>确定要删除此密钥吗？</p></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-danger" id="confirmDeleteCKey">删除</button></div>');
+  document.getElementById('confirmDeleteCKey').addEventListener('click', async function() {
+    try { await api('/clients/' + cid + '/keys/' + kid, { method: 'DELETE' }); closeModal(); toast('删除成功', 'success'); manageClientKeys(cid); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+function clientUsage(id) {
+  (async function() {
+    try {
+      const u = await api('/clients/' + id + '/usage');
+      let html = '<div class="modal-header"><h3>用量统计</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><div class="stat-grid">';
+      const items = [
+        { label: '总请求', val: u.total_requests ?? u.totalRequests ?? '-' },
+        { label: '今日请求', val: u.today_requests ?? u.todayRequests ?? '-' },
+        { label: 'Token用量', val: u.token_usage ?? u.tokenUsage ?? '-' },
+        { label: '本月请求', val: u.monthly_requests ?? u.monthlyRequests ?? '-' },
+      ];
+      items.forEach(i => { html += '<div class="stat-card"><div class="stat-label">' + i.label + '</div><div class="stat-value">' + i.val + '</div></div>'; });
+      html += '</div></div>';
+      showModal(html);
+    } catch(e) { toast(e.message, 'error'); }
+  })();
+}
+
+/* ================================================================ */
+/*  BUCKETS                                                          */
+/* ================================================================ */
+R.buckets = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  document.getElementById('headerActions').innerHTML = '';
+  try {
+    const list = await api('/buckets');
+    c.innerHTML = '';
+    if (!list.length) { c.innerHTML = '<div class="card text-sec">暂无桶数据</div>'; return; }
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap';
+    let html = '<table><thead><tr><th>Key ID</th><th>模型</th><th>RPM</th><th>阈值</th><th>成功率</th><th>响应时间</th><th>冷却</th><th>健康分</th><th>软繁忙</th><th>隔离</th></tr></thead><tbody>';
+    list.forEach(b => {
+      const sb = b.soft_busy ?? false;
+      const iso = (b.isolation_remaining ?? 0) > 0;
+      const cool = (b.cooldown_remaining ?? 0);
+      const rt = b.avg_rt ? (b.avg_rt * 1000).toFixed(0) + 'ms' : '-';
+      html += '<tr><td>' + (b.key_id || '-') + '</td><td>' + (b.model || '-') + '</td><td>' + (b.rpm ?? 0) + '</td><td>' + (b.threshold ?? '-') + '</td><td>' + (b.success_rate ?? '-') + '%</td><td>' + rt + '</td><td>' + (cool ? cool + 's' : '-') + '</td><td>' + (b.health_score ?? '-') + '</td><td>' + (sb ? badge('繁忙','yellow') : badge('正常','green')) + '</td><td>' + (iso ? badge('隔离','red') : badge('正常','green')) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    c.appendChild(wrap);
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+/* ================================================================ */
+/*  LOGS (请求日志)                                                   */
+/* ================================================================ */
+R.logs = async function(page) {
+  if (!page) page = 1;
+  const c = gc();
+  c.innerHTML = spinner();
+  const ha = document.getElementById('headerActions');
+  ha.innerHTML = '';
+  try {
+    // === Fetch stats and logs in parallel ===
+    let stats = null;
+    try { stats = await api('/request-logs-stats/summary'); } catch(e) { /* ignore */ }
+
+    // === Build stats summary section ===
+    let statsHtml = '';
+    if (stats) {
+      const l = stats.latency || {};
+      statsHtml = '<div style="margin-bottom:12px">';
+
+      // Row 1: Core metrics
+      statsHtml += '<div class="stat-grid">' +
+        '<div class="stat-card"><div class="stat-label">总请求</div><div class="stat-value">' + (stats.total ?? 0).toLocaleString() + '</div></div>' +
+        '<div class="stat-card"><div class="stat-label">成功率</div><div class="stat-value" style="color:' + (stats.success_rate >= 90 ? 'var(--success)' : (stats.success_rate >= 70 ? 'var(--warning)' : 'var(--danger)')) + '">' + (stats.success_rate ?? 0) + '%</div></div>' +
+        '<div class="stat-card"><div class="stat-label">成功/错误/认证失败</div><div class="stat-value" style="font-size:16px"><span style="color:var(--success)">' + (stats.success_count ?? 0) + '</span>/<span style="color:var(--danger)">' + (stats.error_count ?? 0) + '</span>/<span style="color:var(--warning)">' + (stats.auth_fail_count ?? 0) + '</span></div></div>' +
+        '<div class="stat-card"><div class="stat-label">总Token数</div><div class="stat-value">' + ((stats.total_tokens ?? 0) / 1e6).toFixed(1) + 'M</div></div>' +
+        '</div>';
+
+      // Row 2: Latency metrics
+      statsHtml += '<div class="stat-grid">' +
+        '<div class="stat-card"><div class="stat-label">平均延迟</div><div class="stat-value">' + (l.avg_ms ?? 0) + 'ms</div></div>' +
+        '<div class="stat-card"><div class="stat-label">P95延迟</div><div class="stat-value" style="color:var(--warning)">' + (l.p95_ms ?? 0) + 'ms</div></div>' +
+        '<div class="stat-card"><div class="stat-label">最大延迟</div><div class="stat-value" style="color:var(--danger)">' + (l.max_ms ?? 0) + 'ms</div></div>' +
+        '<div class="stat-card"><div class="stat-label">Prompt/Completion</div><div class="stat-value" style="font-size:16px">' + ((stats.total_prompt_tokens ?? 0) / 1e6).toFixed(1) + 'M / ' + ((stats.total_completion_tokens ?? 0) / 1e3).toFixed(1) + 'K</div></div>' +
+        '</div>';
+
+      // Row 3: Hourly trend (last 24h)
+      if (stats.hourly_stats && stats.hourly_stats.length) {
+        statsHtml += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:10px">';
+        statsHtml += '<div class="section-title" style="margin:0 0 8px">近24小时请求趋势</div><div class="chart-bars">';
+        const maxH = Math.max(...stats.hourly_stats.map(h => h.cnt || 0), 1);
+        stats.hourly_stats.forEach(h => {
+          const hv = h.cnt || 0;
+          statsHtml += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:1px"><div style="width:100%;background:linear-gradient(to top,var(--primary),rgba(64,153,255,.15));border-radius:2px 2px 0 0;min-height:4px;height:' + Math.max(4, (hv/maxH)*60) + 'px"></div><div style="font-size:8px;color:var(--text-dim);text-align:center">' + (h.hour || '') + ':00</div></div>';
+        });
+        statsHtml += '</div></div>';
+      }
+
+      // Row 4: Top lists in 2-column grid
+      statsHtml += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">';
+
+      // Top paths
+      if (stats.top_paths && stats.top_paths.length) {
+        statsHtml += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px"><div class="section-title" style="margin:0 0 6px;font-size:11px">Top 请求路径</div><div class="table-wrap"><table><thead><tr><th>路径</th><th>次数</th></tr></thead><tbody>' +
+          stats.top_paths.map(p => '<tr><td class="text-sm truncate" style="max-width:180px">' + (p.request_path || '-') + '</td><td>' + (p.cnt ?? 0) + '</td></tr>').join('') +
+          '</tbody></table></div></div>';
+      }
+
+      // Top models
+      if (stats.top_models && stats.top_models.length) {
+        statsHtml += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px"><div class="section-title" style="margin:0 0 6px;font-size:11px">Top 模型</div><div class="table-wrap"><table><thead><tr><th>模型</th><th>请求</th><th>Token</th><th>延迟</th></tr></thead><tbody>' +
+          stats.top_models.map(m => '<tr><td class="text-sm truncate" style="max-width:160px">' + (m.model || '-') + '</td><td>' + (m.cnt ?? 0) + '</td><td>' + ((m.total_tokens ?? 0) / 1e6).toFixed(1) + 'M</td><td>' + (m.avg_latency ? parseInt(m.avg_latency) + 'ms' : '-') + '</td></tr>').join('') +
+          '</tbody></table></div></div>';
+      }
+
+      // Top clients
+      if (stats.top_clients && stats.top_clients.length) {
+        statsHtml += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px"><div class="section-title" style="margin:0 0 6px;font-size:11px">Top 客户端</div><div class="table-wrap"><table><thead><tr><th>客户端</th><th>请求</th><th>Token</th><th>延迟</th></tr></thead><tbody>' +
+          stats.top_clients.map(cl => '<tr><td class="text-sm truncate" style="max-width:140px">' + (cl.client_display || '-') + '</td><td>' + (cl.cnt ?? 0) + '</td><td>' + ((cl.total_tokens ?? 0) / 1e6).toFixed(1) + 'M</td><td>' + (cl.avg_latency ? parseInt(cl.avg_latency) + 'ms' : '-') + '</td></tr>').join('') +
+          '</tbody></table></div></div>';
+      }
+
+      // Top IPs
+      if (stats.top_ips && stats.top_ips.length) {
+        statsHtml += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px"><div class="section-title" style="margin:0 0 6px;font-size:11px">Top 请求IP</div><div class="table-wrap"><table><thead><tr><th>IP</th><th>次数</th></tr></thead><tbody>' +
+          stats.top_ips.map(ip => '<tr><td><code style="font-size:11px">' + (ip.client_ip || '-') + '</code></td><td>' + (ip.cnt ?? 0) + '</td></tr>').join('') +
+          '</tbody></table></div></div>';
+      }
+
+      // Top errors
+      if (stats.top_errors && stats.top_errors.length) {
+        statsHtml += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px"><div class="section-title" style="margin:0 0 6px;font-size:11px;color:var(--danger)">Top 错误类型</div><div class="table-wrap"><table><thead><tr><th>类型</th><th>业务码</th><th>次数</th></tr></thead><tbody>' +
+          stats.top_errors.map(e => '<tr><td>' + (e.error_type || '-') + '</td><td>' + (e.business_code || '-') + '</td><td style="color:var(--danger)">' + (e.cnt ?? 0) + '</td></tr>').join('') +
+          '</tbody></table></div></div>';
+      }
+
+      statsHtml += '</div>';
+
+      // Recent errors
+      if (stats.recent_errors && stats.recent_errors.length) {
+        statsHtml += '<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">';
+        statsHtml += '<div class="section-title" style="margin:0 0 6px;font-size:11px;color:var(--danger)">最近错误 (最新10条)</div><div class="table-wrap"><table><thead><tr><th>时间</th><th>客户端</th><th>模型</th><th>路径</th><th>状态码</th><th>错误类型</th></tr></thead><tbody>';
+        stats.recent_errors.forEach(e => {
+          statsHtml += '<tr><td class="text-sm">' + (e.created_at || '').slice(0,16) + '</td><td class="text-sm">' + (e.client_display || '-') + '</td><td class="text-sm">' + (e.model || '-') + '</td><td class="text-sm">' + (e.request_path || '-') + '</td><td style="color:var(--danger)">' + (e.status_code || '-') + '</td><td>' + (e.error_type || '-') + '</td></tr>';
+        });
+        statsHtml += '</tbody></table></div></div>';
+      }
+
+      statsHtml += '</div>';
+    }
+
+    // === Filters ===
+    ha.innerHTML = '<div class="flex gap-8 items-center flex-wrap">' +
+      '<input placeholder="状态码" id="filtStatusCode" class="filter-input" style="width:80px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-surface);color:var(--text);font-size:12px">' +
+      '<input placeholder="HTTP方法" id="filtMethod" class="filter-input" style="width:90px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-surface);color:var(--text);font-size:12px">' +
+      '<input placeholder="模型" id="filtModel" class="filter-input" style="width:140px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-surface);color:var(--text);font-size:12px">' +
+      '<input placeholder="路径" id="filtRequestPath" class="filter-input" style="width:120px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-surface);color:var(--text);font-size:12px">' +
+      '<input placeholder="客户端IP" id="filtClientIp" class="filter-input" style="width:130px;padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-surface);color:var(--text);font-size:12px">' +
+      '<button class="btn btn-sm btn-primary" id="searchLogsBtn">搜索</button>' +
+      '</div>';
+
+    // === Fetch logs ===
+    const params = new URLSearchParams({ page: page, page_size: 20 });
+    ['status_code','method','model','request_path','client_ip','client_id'].forEach(k => {
+      const el = document.getElementById('filt' + k.charAt(0).toUpperCase() + k.slice(1));
+      if (el && el.value) params.set(k, el.value);
+    });
+
+    const data = await api('/request-logs?' + params.toString());
+    c.innerHTML = '';
+    if (statsHtml) c.innerHTML += statsHtml;
+
+    const logs = data.data || data.items || data.records || [];
+    const total = data.total || logs.length || 0;
+    const totalPages = data.total_pages || data.totalPages || Math.ceil(total / 20) || 1;
+
+    // === Logs table ===
+    if (logs.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'table-wrap';
+      let html = '<table><thead><tr><th style="width:140px;white-space:nowrap">时间</th><th style="width:100px">客户端</th><th style="width:100px">来源IP</th><th>路径</th><th style="width:50px">方法</th><th style="width:100px">模型</th><th style="width:60px">状态码</th><th style="width:65px">延迟</th><th style="width:60px">Token</th><th style="width:80px">分类</th><th style="width:55px">操作</th></tr></thead><tbody>';
+      logs.forEach(l => {
+        const ts = (l.created_at || '').slice(0, 19).replace('T', ' ');
+        const cat = l.log_category === 'normal' ? badge('正常','green') : (l.log_category === 'auth_fail' ? badge('认证失败','yellow') : badge('错误','red'));
+        const sc = l.status_code;
+        const scColor = sc == 200 ? 'var(--success)' : (sc >= 500 ? 'var(--danger)' : (sc >= 400 ? 'var(--warning)' : 'var(--text)'));
+        html += '<tr><td class="text-sm" style="white-space:nowrap">' + ts + '</td>' +
+          '<td class="text-sm truncate" style="max-width:100px" title="' + (l.client_name || l.client_id || '') + '">' + (l.client_name || l.client_id || '-') + '</td>' +
+          '<td><code style="font-size:10px">' + (l.client_ip || '-') + '</code></td>' +
+          '<td class="text-sm truncate" style="max-width:100px">' + (l.request_path || '-') + '</td>' +
+          '<td>' + (l.http_method || '-') + '</td>' +
+          '<td class="text-sm truncate" style="max-width:90px">' + (l.model || '-') + '</td>' +
+          '<td style="color:' + scColor + ';font-weight:600">' + (sc ?? '-') + '</td>' +
+          '<td>' + formatLatency(l.latency_ms) + '</td>' +
+          '<td>' + (l.total_tokens ? (l.total_tokens / 1e3).toFixed(0) + 'K' : '-') + '</td>' +
+          '<td>' + cat + '</td>' +
+          '<td><button class="btn btn-sm" data-id="' + l.id + '" onclick="viewLogDetail(\'' + l.id + '\')">详情</button></td></tr>';
+      });
+      html += '</tbody></table>';
+      wrap.innerHTML = html;
+      c.appendChild(wrap);
+
+      const pg = pagination(page, total, totalPages, function(np) { R.logs(np); });
+      c.appendChild(pg);
+    } else {
+      c.innerHTML += '<div class="card text-sec">暂无日志</div>';
+    }
+
+    document.getElementById('searchLogsBtn')?.addEventListener('click', function() { R.logs(1); });
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+function viewLogDetail(id) {
+  (async function() {
+    try {
+      const d = await api('/request-logs/' + id);
+      const statusColor = d.status_code == 200 ? 'var(--success)' : (d.status_code >= 500 ? 'var(--danger)' : 'var(--warning)');
+      let html = '<div class="modal-header"><h3>日志详情</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body">';
+
+      // Summary row
+      html += '<div class="stat-grid" style="margin-bottom:10px">' +
+        '<div class="stat-card"><div class="stat-label">状态码</div><div class="stat-value" style="color:' + statusColor + '">' + (d.status_code ?? '-') + '</div></div>' +
+        '<div class="stat-card"><div class="stat-label">延迟</div><div class="stat-value">' + formatLatency(d.latency_ms) + '</div></div>' +
+        '<div class="stat-card"><div class="stat-label">Token</div><div class="stat-value">' + (d.total_tokens ?? '-') + '</div></div>' +
+        '<div class="stat-card"><div class="stat-label">分类</div><div class="stat-value">' + (d.log_category || '-') + '</div></div>' +
+        '</div>';
+
+      // Key fields
+      const fields = [
+        {label:'请求ID',val:d.id},
+        {label:'客户端ID',val:d.client_id},
+        {label:'客户端名称',val:d.client_name},
+        {label:'上游密钥ID',val:d.upstream_key_id},
+        {label:'请求时间',val:d.created_at},
+        {label:'开始时间',val:d.started_at},
+        {label:'完成时间',val:d.completed_at},
+        {label:'来源IP',val:d.client_ip},
+        {label:'User-Agent',val:d.user_agent},
+        {label:'请求路径',val:d.request_path},
+        {label:'HTTP方法',val:d.http_method},
+        {label:'模型',val:d.model},
+        {label:'流式',val:d.is_stream ? '是' : '否'},
+        {label:'Prompt Token',val:d.prompt_tokens},
+        {label:'Completion Token',val:d.completion_tokens},
+        {label:'错误类型',val:d.error_type},
+        {label:'业务码',val:d.business_code},
+        {label:'错误信息',val:d.error_msg},
+      ];
+
+      html += '<div class="table-wrap"><table>';
+      fields.forEach(f => {
+        if (f.val === undefined || f.val === null || f.val === '') return;
+        html += '<tr><td style="color:var(--text-sec);white-space:nowrap;font-size:12px;padding:4px 10px">' + f.label + '</td><td style="font-size:12px;padding:4px 10px;word-break:break-all">' + String(f.val).slice(0, 500) + '</td></tr>';
+      });
+      html += '</table></div>';
+
+      // Error detail expandable
+      if (d.error_detail) {
+        html += '<div style="margin-top:8px"><div class="section-title" style="font-size:11px;color:var(--danger);margin:0 0 4px">错误详情</div><pre style="background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;max-height:200px;overflow:auto;color:var(--danger);white-space:pre-wrap">' + escapeHtml(d.error_detail) + '</pre></div>';
+      }
+      if (d.response_body) {
+        try {
+          const rb = typeof d.response_body === 'string' ? JSON.parse(d.response_body) : d.response_body;
+          html += '<div style="margin-top:8px"><div class="section-title" style="font-size:11px;margin:0 0 4px">响应内容</div><pre style="background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;max-height:300px;overflow:auto;white-space:pre-wrap">' + escapeHtml(JSON.stringify(rb, null, 2)) + '</pre></div>';
+        } catch(e) {
+          if (d.response_body) {
+            html += '<div style="margin-top:8px"><div class="section-title" style="font-size:11px;margin:0 0 4px">响应内容</div><pre style="background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;max-height:200px;overflow:auto;white-space:pre-wrap">' + escapeHtml(String(d.response_body).slice(0,2000)) + '</pre></div>';
+          }
+        }
+      }
+      if (d.request_body) {
+        html += '<div style="margin-top:8px"><div class="section-title" style="font-size:11px;margin:0 0 4px">请求内容</div><pre style="background:var(--bg-surface);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;max-height:200px;overflow:auto;white-space:pre-wrap">' + escapeHtml(String(d.request_body).slice(0,2000)) + '</pre></div>';
+      }
+
+      html += '</div>';
+      showModal(html);
+    } catch(e) { toast(e.message, 'error'); }
+  })();
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatLatency(ms) {
+  if (ms === null || ms === undefined || ms === '') return '-';
+  ms = Number(ms);
+  if (isNaN(ms)) return '-';
+  if (ms >= 60000) return (ms / 60000).toFixed(1) + 'm';
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+  return ms + 'ms';
+}
+
+/* ================================================================ */
+/*  ALGO (算法引擎)                                                   */
+/* ================================================================ */
+R.algo = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  document.getElementById('headerActions').innerHTML = '';
+  try {
+    const stats = await api('/algorithm-stats');
+    c.innerHTML = '';
+    const gs = stats.global_stats || {};
+    const algoKeys = Object.keys(stats).filter(k => k.startsWith('algorithm_') || k === 'global_stats');
+    const algos = algoKeys.filter(k => k !== 'global_stats');
+    if (algos.length) {
+      const grid = document.createElement('div');
+      grid.className = 'stat-grid';
+      algos.forEach(k => {
+        const a = stats[k];
+        if (!a) return;
+        const card = document.createElement('div');
+        card.className = 'stat-card';
+        card.style.cursor = 'pointer';
+        card.innerHTML = '<div class="stat-label" style="font-size:12px">' + (a.name || k) + '</div><div class="stat-value" style="font-size:20px">' + (a.total_buckets ?? a.value ?? a.count ?? a.current ?? a.total ?? '-') + '</div><div class="stat-sub">' + (a.note || '') + '</div>';
+        card.addEventListener('click', function() {
+          const num = k.replace('algorithm_', '');
+          algoDetail(parseInt(num));
+        });
+        grid.appendChild(card);
+      });
+      c.appendChild(grid);
+      // Global stats row
+      if (gs.total_buckets != null) {
+        const sec = document.createElement('div');
+        sec.innerHTML = '<div class="section-title">全局统计</div><div class="stat-grid">' +
+          '<div class="stat-card"><div class="stat-label">总桶数</div><div class="stat-value">' + (gs.total_buckets ?? 0) + '</div></div>' +
+          '<div class="stat-card"><div class="stat-label">冷却桶数</div><div class="stat-value">' + (gs.cooling_buckets ?? 0) + '</div></div>' +
+          '<div class="stat-card"><div class="stat-label">健康密钥数</div><div class="stat-value">' + (gs.healthy_key_count ?? 0) + '</div></div>' +
+          '<div class="stat-card"><div class="stat-label">降级模式</div><div class="stat-value">' + (gs.degraded_mode ? badge('是','red') : badge('否','green')) + '</div></div>' +
+          '</div>';
+        c.appendChild(sec);
+      }
+    } else {
+      c.innerHTML = '<div class="card text-sec">暂无算法数据</div>';
+    }
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+function algoDetail(num) {
+  (async function() {
+    const c = gc();
+    c.innerHTML = spinner();
+    document.getElementById('headerActions').innerHTML = '';
+    try {
+      const d = await api('/algorithm/' + num);
+      c.innerHTML = '';
+      const meta = d.meta || {};
+      const summary = d.summary || {};
+      const gs = d.global_stats || {};
+      const bd = d.bucket_details;
+      const cd = d.client_details;
+      const config = d.config;
+      // Back button
+      const backDiv = document.createElement('div');
+      backDiv.innerHTML = '<button class="btn btn-sm mb-12" onclick="nav(\'algo\')">← 返回算法引擎</button>';
+      c.appendChild(backDiv);
+      // Meta card
+      const mc = document.createElement('div');
+      mc.className = 'card';
+      let mcHtml = '<h3 style="margin-bottom:8px">' + escapeHtml(meta.name || '算法 #' + num);
+      if (meta.category) mcHtml += ' ' + badge(escapeHtml(meta.category), 'blue');
+      mcHtml += '</h3>';
+      if (meta.trigger) mcHtml += '<div class="mb-8"><span class="text-sec">触发条件:</span> ' + escapeHtml(meta.trigger) + '</div>';
+      if (meta.desc) mcHtml += '<p class="text-sm text-sec" style="line-height:1.6">' + escapeHtml(meta.desc) + '</p>';
+      mc.innerHTML = mcHtml;
+      c.appendChild(mc);
+      // Summary stats
+      const sumKeys = Object.keys(summary);
+      if (sumKeys.length > 0) {
+        const grid = document.createElement('div');
+        grid.className = 'stat-grid';
+        sumKeys.forEach(k => {
+          const v = summary[k];
+          const label = k.replace(/_/g, ' ');
+          const val = (v !== null && v !== undefined) ? (typeof v === 'number' ? v.toLocaleString() : v) : '-';
+          const card = document.createElement('div');
+          card.className = 'stat-card';
+          card.innerHTML = '<div class="stat-label">' + label + '</div><div class="stat-value">' + val + '</div>';
+          grid.appendChild(card);
+        });
+        c.appendChild(grid);
+      }
+      // Global stats
+      const gsKeys = Object.keys(gs);
+      if (gsKeys.length > 0) {
+        const sec = document.createElement('div');
+        sec.innerHTML = '<div class="section-title">全局统计</div><div class="stat-grid">' +
+          '<div class="stat-card"><div class="stat-label">总桶数</div><div class="stat-value">' + ((gs.total_buckets ?? 0)).toLocaleString() + '</div></div>' +
+          '<div class="stat-card"><div class="stat-label">冷却桶数</div><div class="stat-value">' + ((gs.cooling_buckets ?? 0)).toLocaleString() + '</div></div>' +
+          '<div class="stat-card"><div class="stat-label">健康密钥数</div><div class="stat-value">' + ((gs.healthy_key_count ?? 0)).toLocaleString() + '</div></div>' +
+          '<div class="stat-card"><div class="stat-label">降级模式</div><div class="stat-value">' + (gs.degraded_mode ? badge('是','red') : badge('否','green')) + '</div></div>' +
+          '</div>';
+        c.appendChild(sec);
+      }
+      // Build detail table helper
+      function buildDetailTable(items, title) {
+        if (!items || items.length === 0) return null;
+        const sec = document.createElement('div');
+        const headers = Object.keys(items[0]);
+        sec.innerHTML = '<div class="section-title">' + title + ' <span class="text-sec text-sm">(' + items.length + ')</span></div>';
+        const wrap = document.createElement('div');
+        wrap.className = 'table-wrap';
+        let html = '<table><thead><tr>';
+        headers.forEach(h => { html += '<th>' + h.replace(/_/g, ' ') + '</th>'; });
+        html += '</tr></thead><tbody>';
+        items.forEach(item => {
+          html += '<tr>'; headers.forEach(h => { const v = item[h]; html += '<td class="text-sm">' + (v !== null && v !== undefined ? (typeof v === 'number' ? v.toLocaleString() : escapeHtml(String(v))) : '-') + '</td>'; }); html += '</tr>';
+        });
+        html += '</tbody></table>';
+        wrap.innerHTML = html;
+        sec.appendChild(wrap);
+        return sec;
+      }
+      // Bucket details
+      const bdSec = buildDetailTable(bd, '桶详情');
+      if (bdSec) c.appendChild(bdSec);
+      // Client details
+      const cdSec = buildDetailTable(cd, '客户端详情');
+      if (cdSec) c.appendChild(cdSec);
+      // Config
+      if (config && Object.keys(config).length > 0) {
+        const sec = document.createElement('div');
+        let html = '<div class="section-title">配置</div><div class="card"><div class="table-wrap"><table>';
+        Object.entries(config).forEach(([k, v]) => {
+          const val = (v !== null && v !== undefined) ? String(v) : '-';
+          html += '<tr><td style="color:var(--text-sec);white-space:nowrap;padding-right:20px">' + k + '</td><td class="text-sm">' + val + '</td></tr>';
+        });
+        html += '</table></div></div>';
+        sec.innerHTML = html;
+        c.appendChild(sec);
+      }
+    } catch(e) {
+      c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+    }
+  })();
+}
+
+/* ================================================================ */
+/*  MONITOR (系统监控)                                                */
+/* ================================================================ */
+R.monitor = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  document.getElementById('headerActions').innerHTML = '';
+  try {
+    const [concurrency, ipMonitor, blocked, anomalies, userStats, health] = await Promise.all([
+      api('/system/concurrency').catch(() => null),
+      api('/system/ip-monitor').catch(() => null),
+      api('/system/ip-monitor/blocked').catch(() => null),
+      api('/system/ip-monitor/anomalies').catch(() => null),
+      api('/system/user-stats').catch(() => null),
+      api('/system/health').catch(() => null),
+    ]);
+
+    c.innerHTML = '';
+
+    // Health
+    if (health) {
+      const h = document.createElement('div');
+      h.className = 'card mb-12';
+      h.innerHTML = '<div class="flex items-center justify-between"><span class="section-title" style="margin:0">系统健康</span>' + (health.status === 'healthy' ? badge('健康','green') : badge('异常','red')) + '</div>';
+      if (health.checks) {
+        let hhtml = '<div class="table-wrap mt-12"><table><thead><tr><th>检查项</th><th>状态</th><th>详情</th></tr></thead><tbody>';
+        Object.entries(health.checks).forEach(([k,v]) => {
+          hhtml += '<tr><td>' + k + '</td><td>' + (v.status||v === true ? badge('通过','green') : badge('异常','red')) + '</td><td class="text-sm">' + (v.detail||v.message||'-') + '</td></tr>';
+        });
+        hhtml += '</tbody></table></div>';
+        h.innerHTML += hhtml;
+      }
+      c.appendChild(h);
+    }
+
+    // Concurrency
+    if (concurrency) {
+      const sec = document.createElement('div');
+      sec.innerHTML = '<div class="section-title">并发统计</div><div class="stat-grid">';
+      const ci = [
+        { label: '当前并发', val: concurrency.current ?? concurrency.current_concurrency ?? concurrency.current_requests ?? '-' },
+        { label: '峰值', val: concurrency.peak ?? concurrency.max ?? '-' },
+        { label: '限制', val: concurrency.limit ?? concurrency.max_limit ?? '-' },
+      ];
+      ci.forEach(i => { sec.innerHTML += '<div class="stat-card"><div class="stat-label">' + i.label + '</div><div class="stat-value">' + i.val + '</div></div>'; });
+      sec.innerHTML += '</div>';
+      c.appendChild(sec);
+    }
+
+    // IP Monitor
+    if (ipMonitor) {
+      const sec = document.createElement('div');
+      sec.innerHTML = '<div class="section-title">IP监测</div><div class="stat-grid"><div class="stat-card"><div class="stat-label">总请求IP</div><div class="stat-value">' + (ipMonitor.total_ips ?? ipMonitor.totalIps ?? '-') + '</div></div><div class="stat-card"><div class="stat-label">异常IP</div><div class="stat-value">' + (ipMonitor.anomaly_count ?? ipMonitor.anomalyCount ?? '-') + '</div></div><div class="stat-card"><div class="stat-label">封禁IP</div><div class="stat-value">' + (ipMonitor.blocked_count ?? ipMonitor.blockedCount ?? '-') + '</div></div></div>';
+      c.appendChild(sec);
+    }
+
+    // Blocked IPs
+    if (blocked && blocked.length) {
+      const sec = document.createElement('div');
+      sec.innerHTML = '<div class="section-title">封禁IP列表 <span class="text-sec text-sm">(' + blocked.length + ')</span></div><div class="table-wrap"><table><thead><tr><th>IP</th><th>原因</th><th>时间</th><th>操作</th></tr></thead><tbody>';
+      blocked.forEach(b => {
+        sec.innerHTML += '<tr><td>' + (b.ip||b.address||'-') + '</td><td>' + (b.reason||'-') + '</td><td>' + (b.blocked_at||b.time||'-') + '</td><td><button class="btn btn-sm btn-warning" data-ip="' + (b.ip||b.address) + '" onclick="unblockIP(\'' + (b.ip||b.address) + '\')">解封</button></td></tr>';
+      });
+      sec.innerHTML += '</tbody></table></div>';
+      c.appendChild(sec);
+    }
+
+    // Anomalies
+    if (anomalies && anomalies.length) {
+      const sec = document.createElement('div');
+      sec.innerHTML = '<div class="section-title">异常IP <span class="text-sec text-sm">(' + anomalies.length + ')</span></div><div class="table-wrap"><table><thead><tr><th>IP</th><th>类型</th><th>次数</th><th>最后时间</th></tr></thead><tbody>';
+      anomalies.forEach(a => {
+        sec.innerHTML += '<tr><td>' + (a.ip||a.address||'-') + '</td><td>' + (a.type||a.anomaly_type||'-') + '</td><td>' + (a.count||a.times||'-') + '</td><td>' + (a.last_time||a.last_seen||'-') + '</td></tr>';
+      });
+      sec.innerHTML += '</tbody></table></div>';
+      c.appendChild(sec);
+    }
+
+    // User Stats
+    if (userStats) {
+      const sec = document.createElement('div');
+      sec.innerHTML = '<div class="section-title">用户分类统计</div><div class="stat-grid">';
+      Object.entries(userStats).forEach(([k,v]) => {
+        sec.innerHTML += '<div class="stat-card"><div class="stat-label">' + k + '</div><div class="stat-value">' + v + '</div></div>';
+      });
+      sec.innerHTML += '</div>';
+      c.appendChild(sec);
+    }
+
+    if (!health && !concurrency && !ipMonitor && !blocked && !anomalies && !userStats) {
+      c.innerHTML = '<div class="card text-sec">暂无监控数据</div>';
+    }
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+function unblockIP(ip) {
+  showModal('<div class="modal-header"><h3>确认解封</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><p>确定要解封IP ' + ip + ' 吗？</p></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-warning" id="confirmUnblockIP">解封</button></div>');
+  document.getElementById('confirmUnblockIP').addEventListener('click', async function() {
+    try { await api('/system/ip-monitor/unblock', { method: 'POST', body: JSON.stringify({ ip: ip }) }); closeModal(); toast('解封成功', 'success'); R.monitor(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+/* ================================================================ */
+/*  CONFIG (系统配置)                                                 */
+/* ================================================================ */
+R.config = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  const ha = document.getElementById('headerActions');
+  ha.innerHTML = '<button class="btn btn-primary btn-sm" id="saveConfigBtn">保存配置</button>';
+  try {
+    const settings = await api('/settings');
+    c.innerHTML = '';
+    const form = document.createElement('div');
+    form.className = 'card';
+    let html = '';
+    if (Array.isArray(settings)) {
+      settings.forEach(s => {
+        const key = s.key || s.name || '';
+        const val = s.value || '';
+        html += '<div class="form-group"><label>' + key + '</label><input class="cfg-input" data-key="' + key + '" value="' + String(val).replace(/"/g,'&quot;') + '"></div>';
+      });
+    } else {
+      Object.entries(settings).forEach(([k,v]) => {
+        html += '<div class="form-group"><label>' + k + '</label><input class="cfg-input" data-key="' + k + '" value="' + String(v).replace(/"/g,'&quot;') + '"></div>';
+      });
+    }
+    form.innerHTML = html;
+    c.appendChild(form);
+
+    document.getElementById('saveConfigBtn').addEventListener('click', async function() {
+      const inputs = document.querySelectorAll('.cfg-input');
+      const body = {};
+      inputs.forEach(inp => { body[inp.dataset.key] = inp.value; });
+      try { await api('/settings', { method: 'POST', body: JSON.stringify({ key: body }) }); toast('保存成功', 'success'); }
+      catch(e) { toast(e.message, 'error'); }
+    });
+
+    // v10.0: 维护模式开关
+    const mtDiv = document.createElement('div');
+    mtDiv.className = 'card';
+    mtDiv.style.marginTop = '16px';
+    mtDiv.innerHTML = '<h3>维护模式</h3><p class="text-sec" style="margin:8px 0">开启后所有API请求将返回503维护页面</p><button class="btn btn-warning" id="toggleMaintenanceBtn">切换维护模式</button>';
+    c.appendChild(mtDiv);
+    document.getElementById('toggleMaintenanceBtn').addEventListener('click', async function() {
+      try { const r = await api('/maintenance', { method: 'POST' }); toast('维护模式: ' + (r.maintenance ? '开启' : '关闭'), 'info'); R.config(); }
+      catch(e) { toast(e.message, 'error'); }
+    });
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+/* ================================================================ */
+/*  TOKENS (平台令牌)                                                 */
+/* ================================================================ */
+R.tokens = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  const ha = document.getElementById('headerActions');
+  ha.innerHTML = '<button class="btn btn-primary btn-sm" id="createTokenBtn">+ 创建令牌</button>';
+  try {
+    const list = await api('/platform-tokens');
+    c.innerHTML = '';
+    if (!list.length) { c.innerHTML = '<div class="card text-sec">暂无平台令牌</div>'; return; }
+    const wrap = document.createElement('div');
+    wrap.className = 'table-wrap';
+    let html = '<table><thead><tr><th>名称</th><th>Token</th><th>作用域</th><th>创建时间</th><th>操作</th></tr></thead><tbody>';
+    list.forEach(t => {
+      var scopes = typeof t.scopes === 'string' ? (function(){try{var s=JSON.parse(t.scopes);return Array.isArray(s)?s:[];}catch(e){return [];}})() : (t.scopes || []);
+      html += '<tr><td>' + (t.name||'-') + '</td><td class="text-sm truncate" style="max-width:200px">' + (t.token||t.id||'-') + '</td><td>' + (scopes.join(', ') || '-') + '</td><td>' + (t.created_at||t.createdAt||'-') + '</td><td><button class="btn btn-sm btn-danger" data-id="' + (t.id||t.token_id) + '" onclick="deleteToken(\'' + (t.id||t.token_id) + '\')">删除</button></td></tr>';
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    c.appendChild(wrap);
+
+    document.getElementById('createTokenBtn').addEventListener('click', function() { createToken(); });
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+function createToken() {
+  showModal('<div class="modal-header"><h3>创建平台令牌</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><div class="form-group"><label>名称</label><input id="f_tname" placeholder="令牌名称"></div><div class="form-group"><label>作用域 (逗号分隔)</label><input id="f_scopes" placeholder="read,write"></div></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-primary" id="saveTokenBtn">创建</button></div>');
+  document.getElementById('saveTokenBtn').addEventListener('click', async function() {
+    const name = document.getElementById('f_tname').value;
+    const scopes = document.getElementById('f_scopes').value.split(',').map(s => s.trim()).filter(Boolean);
+    if (!name) { toast('名称不能为空', 'error'); return; }
+    try { await api('/platform-tokens', { method: 'POST', body: JSON.stringify({ name, scopes }) }); closeModal(); toast('创建成功', 'success'); R.tokens(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+function deleteToken(id) {
+  showModal('<div class="modal-header"><h3>确认删除</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><p>确定要删除此令牌吗？此操作不可撤销。</p></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-danger" id="confirmDeleteToken">删除</button></div>');
+  document.getElementById('confirmDeleteToken').addEventListener('click', async function() {
+    try { await api('/platform-tokens/' + id, { method: 'DELETE' }); closeModal(); toast('删除成功', 'success'); R.tokens(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+/* ================================================================ */
+/*  ERRORS (错误码)                                                   */
+/* ================================================================ */
+R.errors = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  document.getElementById('headerActions').innerHTML = '';
+  try {
+    const raw = await api('/error-codes');
+    c.innerHTML = '';
+    const list = raw.error_codes || raw.codes || raw.data || raw;
+    const codes = Array.isArray(list) ? list : [];
+    if (Array.isArray(codes) && codes.length) {
+      codes.forEach(e => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = '<div class="flex items-center justify-between mb-8"><span style="font-size:24px;font-weight:700;color:var(--primary)">' + (e.code||e.error_code||'-') + '</span><span class="badge badge-blue">' + (e.title||e.name||'-') + '</span></div><div class="text-sm mb-8">' + (e.description||e.desc||'-') + '</div><div class="text-xs text-sec">常见原因: ' + (e.cause||e.reason||e.common_cause||'-') + '</div><div class="text-xs text-sec mt-12">解决方案: ' + (e.solution||e.resolve||e.solution||'-') + '</div>';
+        c.appendChild(card);
+      });
+    } else {
+      c.innerHTML = '<div class="card text-sec">暂无错误码数据</div>';
+    }
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+/* ================================================================ */
+/*  COMMERCIAL (商用检测)                                             */
+/* ================================================================ */
+R.commercial = async function() {
+  const c = gc();
+  c.innerHTML = spinner();
+  document.getElementById('headerActions').innerHTML = '';
+  try {
+    const list = await api('/commercial-detection');
+    c.innerHTML = '';
+    if (!list.length) { c.innerHTML = '<div class="card text-sec">暂无商用检测数据</div>'; return; }
+    list.forEach(item => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const conf = item.confidence ?? item.score ?? '-';
+      const fp = item.false_positive ?? false;
+      const ac = item.admin_confirmed ?? false;
+      const blocked = item.blocked ?? item.is_blocked ?? false;
+      let dims = '';
+      if (item.dimensions || item.scores) {
+        const d = item.dimensions || item.scores || {};
+        dims = '<div class="flex flex-wrap gap-8 mt-12">';
+        Object.entries(d).forEach(([k,v]) => { dims += '<span class="badge badge-gray">' + k + ': ' + v + '</span>'; });
+        dims += '</div>';
+      }
+      card.innerHTML = '<div class="flex items-center justify-between mb-8"><div><strong>' + (item.name||item.id||'-') + '</strong> <span class="text-sec text-sm">置信度: ' + conf + '%</span></div><div class="flex gap-8">' + (fp?badge('误报','yellow'):'') + (ac?badge('已确认','blue'):'') + (blocked?badge('已封禁','red'):badge('正常','green')) + '</div></div>' + dims + '<div class="flex gap-8 mt-12">' + '<button class="btn btn-sm" data-id="' + item.id + '" data-action="confirm">' + (ac?'取消确认':'确认') + '</button>' + '<button class="btn btn-sm" data-id="' + item.id + '" data-action="fp">' + (fp?'取消误报':'标记误报') + '</button>' + (blocked ? '<button class="btn btn-sm btn-warning" data-id="' + item.id + '" data-action="unblock">解封</button>' : '<button class="btn btn-sm btn-danger" data-id="' + item.id + '" data-action="block">封禁</button>') + '</div>';
+      c.appendChild(card);
+    });
+
+    c.querySelectorAll('[data-action="confirm"]').forEach(b => b.addEventListener('click', async function() {
+      const id = this.dataset.id;
+      const item = list.find(i => String(i.id) === String(id));
+      const newVal = !(item.admin_confirmed ?? false);
+      try { await api('/commercial-detection/' + id, { method: 'PUT', body: JSON.stringify({ admin_confirmed: newVal, false_positive: item.false_positive ?? false }) }); toast('更新成功', 'success'); R.commercial(); }
+      catch(e) { toast(e.message, 'error'); }
+    }));
+
+    c.querySelectorAll('[data-action="fp"]').forEach(b => b.addEventListener('click', async function() {
+      const id = this.dataset.id;
+      const item = list.find(i => String(i.id) === String(id));
+      const newVal = !(item.false_positive ?? false);
+      try { await api('/commercial-detection/' + id, { method: 'PUT', body: JSON.stringify({ admin_confirmed: item.admin_confirmed ?? false, false_positive: newVal }) }); toast('更新成功', 'success'); R.commercial(); }
+      catch(e) { toast(e.message, 'error'); }
+    }));
+
+    c.querySelectorAll('[data-action="block"]').forEach(b => b.addEventListener('click', async function() {
+      const id = this.dataset.id;
+      try { await api('/commercial-detection/' + id + '/block', { method: 'POST' }); toast('封禁成功', 'success'); R.commercial(); }
+      catch(e) { toast(e.message, 'error'); }
+    }));
+
+    c.querySelectorAll('[data-action="unblock"]').forEach(b => b.addEventListener('click', async function() {
+      const id = this.dataset.id;
+      try { await api('/commercial-detection/' + id + '/unblock', { method: 'POST' }); toast('解封成功', 'success'); R.commercial(); }
+      catch(e) { toast(e.message, 'error'); }
+    }));
+  } catch(e) {
+    c.innerHTML = '<div class="card text-sec">加载失败: ' + e.message + '</div>';
+  }
+};
+
+/* --- Init --- */
+document.addEventListener('DOMContentLoaded', function() {
+  render();
+});
+
+// v10.0: 上游密钥显示明文
+function revealUpstreamKey(id) {
+  api('/upstreams/' + id + '/reveal').then(r => {
+    const key = r.key || r.api_key || r.apiKey || JSON.stringify(r);
+    showModal('<div class="modal-header"><h3>上游密钥明文</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><input type="text" class="cfg-input" readonly style="width:100%" value="' + key.replace(/"/g,'&quot;') + '"><p class="text-sec" style="margin-top:8px">请妥善保管此密钥</p></div><div class="modal-footer"><button class="btn" onclick="closeModal()">关闭</button><button class="btn btn-primary" onclick="navigator.clipboard.writeText(\'' + key.replace(/"/g,'&quot;') + '\').then(()=>toast(\'已复制\',\'success\'))">复制</button></div>');
+  }).catch(e => toast(e.message, 'error'));
+}
+
+// v10.0: 客户密钥启用/禁用切换
+function toggleClientKeyStatus(clientId, keyId, currentStatus) {
+  const newStatus = currentStatus === 'active' ? 'disabled' : 'active';
+  api('/clients/' + clientId + '/keys/' + keyId, { method: 'PUT', body: JSON.stringify({ status: newStatus }) })
+    .then(() => { toast('密钥已' + (newStatus === 'active' ? '启用' : '禁用'), 'success'); R.clients(); })
+    .catch(e => toast(e.message, 'error'));
+}
+
+// v10.0: 桶解冻
+function unfreezeBucket(keyId, model) {
+  showModal('<div class="modal-header"><h3>确认解冻桶</h3><button class="modal-close" onclick="closeModal()">x</button></div><div class="modal-body"><p>确定要解冻此桶吗？</p><p class="text-sm text-sec">Key: ' + keyId + '<br>Model: ' + model + '</p></div><div class="modal-footer"><button class="btn" onclick="closeModal()">取消</button><button class="btn btn-warning" id="confirmUnfreezeBucket">解冻</button></div>');
+  document.getElementById('confirmUnfreezeBucket').addEventListener('click', async function() {
+    try { await api('/buckets/' + keyId + '/' + encodeURIComponent(model) + '/unfreeze', { method: 'POST' }); closeModal(); toast('桶已解冻', 'success'); R.buckets(); }
+    catch(e) { toast(e.message, 'error'); }
+  });
+}
+
+})();
+</script>
+</body>
+</html>
