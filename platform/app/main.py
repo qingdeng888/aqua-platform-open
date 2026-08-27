@@ -179,7 +179,7 @@ async def healthz(request: Request = None):
 
     return {
         "status": "ok" if db_ok else "degraded",
-        "version": "10.0.0",
+        "version": "11.0.0",
         "database": "ok" if db_ok else "error",
         "gateway": "ok" if gw_ok else "error",
     }
