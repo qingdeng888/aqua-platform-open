@@ -6,7 +6,9 @@
 # 凭据：GHCR 用内置 GITHUB_TOKEN 登录，无需配置任何 Secret
 #
 # 镜像地址：ghcr.io/<owner>/<repo>（由 github.repository 自动推导，fork 后无需改）
-# 镜像标签：分支名 / 语义版本(打 tag 时) / sha-<短哈希> / latest(仅默认分支)
+# 镜像标签：分支名 / 语义版本(打 tag 时) / sha-<短哈希> / latest(默认分支推送与打 tag 时)
+# 镜像架构：会更新 latest 的构建（默认分支 / v* 标签）恒为 linux/amd64 + linux/arm64 双架构；
+#           其他分支与 PR 只构 amd64（QEMU 模拟 arm64 约慢 3 倍，日常推送不值当）
 #
 # ⚠️ 首次构建后 GHCR 包默认是 private，`docker pull` 会要求登录。
 #    公开拉取需到 GitHub → Packages → 该包 → Package settings → Change
@@ -75,18 +77,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 只有打 v* 标签发版时才交叉构建 arm64（QEMU 模拟慢），日常推送只构 amd64
+      # 会更新 latest 的构建必须是双架构：默认分支推送刷新 latest，打 v* 标签发语义版本 + latest。
+      # 其余分支与 PR 只构 amd64——QEMU 模拟 arm64 慢（实测 3.5min vs 1min），日常推送不值当。
       - name: 计算目标架构
         id: plat
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ "$REF_TYPE" == "tag" || "$REF_NAME" == "$DEFAULT_BRANCH" ]]; then
             echo "platforms=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+            echo "qemu=1" >> "$GITHUB_OUTPUT"
           else
             echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+            echo "qemu=0" >> "$GITHUB_OUTPUT"
           fi
+          echo "ref=$REF_NAME ($REF_TYPE) 默认分支=$DEFAULT_BRANCH" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 准备 QEMU（交叉构建 arm64 用）
-        if: github.ref_type == 'tag'
+        if: steps.plat.outputs.qemu == '1'
         uses: docker/setup-qemu-action@v3
 
       - uses: docker/setup-buildx-action@v3
@@ -130,8 +140,26 @@ jobs:
 
       - name: 输出镜像地址
         if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          PLATFORMS: ${{ steps.plat.outputs.platforms }}
         run: |
-          echo "### 镜像已推送" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### 镜像已推送（架构：$PLATFORMS）"
+            echo '```'
+            echo "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 守卫：凡是打了 latest 的推送，manifest 必须同时含 amd64 与 arm64。
+      # 架构判定逻辑一旦被改坏，这里立刻红灯，而不是等用户在 arm 机器上 pull 才发现。
+      - name: 校验 latest 为双架构
+        if: github.event_name != 'pull_request' && contains(steps.meta.outputs.tags, ':latest')
+        run: |
+          img="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          docker buildx imagetools inspect "$img" > /tmp/manifest.txt
+          cat /tmp/manifest.txt
+          for p in linux/amd64 linux/arm64; do
+            grep -q "$p" /tmp/manifest.txt || { echo "::error::$img 缺少 $p"; exit 1; }
+          done
+          echo "✅ $img 双架构校验通过（linux/amd64 + linux/arm64）" >> "$GITHUB_STEP_SUMMARY"

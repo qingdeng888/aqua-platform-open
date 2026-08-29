@@ -47,7 +47,7 @@ v12.1 为纯中转网关补上**出网通道治理**：上游密钥不再只能�
 | **探活一致性** | 三条密钥探活路径与 `/upstreams/health-check` 全部改走该密钥自己的出网通道，代理专用密钥不再被误判停用 |
 | **模型测试** | 新增「模型测试」页（11 → 12 页）与 `/gw/admin/model-test/*`：实时模型列表 + 搜索/全选 + 并发批量探测，可选「直连 NVIDIA 上游」或「走本网关中转」两条通道 |
 | **容器化** | 新增 `Dockerfile`（多阶段、非 root、内建健康检查）+ `docker-compose.yml`（网关 + PostgreSQL 17，默认拉 CI 预构建镜像）+ `docker-compose.local.yml`（本机源码构建覆盖层）+ `.dockerignore`，`docker compose pull && docker compose up -d` 起全栈 |
-| **CI/CD** | 新增 `.github/workflows/docker-image.yml`：推送即跑「后端单测 + 前端静态检查」，全绿才构建镜像并推送到 GHCR，无需配置任何 Secret |
+| **CI/CD** | 新增 `.github/workflows/docker-image.yml`：推送即跑「后端单测 + 前端静态检查」，全绿才构建镜像并推送到 GHCR，无需配置任何 Secret；`latest` 恒为 `amd64` + `arm64` 双架构 |
 | **工程化** | 测试基线 105 个后端单测 + 28 项前端静态检查；新增依赖 `httpx[socks]` |
 
 ---
@@ -527,8 +527,9 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f gateway
 要点：
 
 - **镜像地址**：`ghcr.io/<owner>/<repo>`，由 `github.repository` 自动推导，**fork 后无需改任何配置**。
-- **标签**：分支名 / 语义版本（打 tag 时同时发 `{{version}}` 与 `{{major}}.{{minor}}`）/ `sha-<短哈希>` / `latest`。注意 `latest` 的 `enable={{is_default_branch}}` 在 **tag 推送时同样为真**（metadata-action 视 tag 为发版），因此打 `v*` 标签会一并更新 `latest`——这正是 `docker compose pull` 默认能拿到双架构镜像的原因。
-- **架构**：日常推送只构 `linux/amd64`；只有打 `v*` 标签发版时才交叉构建 `linux/amd64,linux/arm64`（QEMU 模拟慢，实测双架构约 3.5 分钟 vs 单架构约 1 分钟）。**需要 arm64 镜像（如树莓派、Apple Silicon、Graviton）就打标签发版**，不要指望分支推送。
+- **标签**：分支名 / 语义版本（打 tag 时同时发 `{{version}}` 与 `{{major}}.{{minor}}`）/ `sha-<短哈希>` / `latest`。`latest` 的 `enable={{is_default_branch}}` 在**默认分支推送与 tag 推送时都为真**（metadata-action 视 tag 为发版）。
+- **架构**：**凡是会更新 `latest` 的构建（`main` 推送、`v*` 标签）恒为 `linux/amd64` + `linux/arm64` 双架构**——`docker compose pull` 拉到的 `latest` 永远同时支持 x86 与 arm（树莓派、Apple Silicon、AWS Graviton 直接可用）。其他分支与 PR 只构 `amd64`，因为 QEMU 模拟 arm64 约慢 3 倍（实测 3.5 分钟 vs 1 分钟），功能分支不值当。
+- **双架构守卫**：构建后自动 `docker buildx imagetools inspect` 校验 `latest` 的 manifest 同时含两个平台，缺一即红灯——架构判定逻辑被改坏会立刻暴露，而不是等用户在 arm 机器上 `pull` 才发现。
 - **缓存**：`type=gha` 跨 workflow 复用层缓存，依赖未变时 builder 阶段直接命中。
 - **PR 只验证构建**，不登录、不推送（fork 的 PR 拿不到写权限）。
 - 纯文档改动（`**.md` / `docs/**` / `LICENSE`）不触发流水线。
@@ -538,13 +539,14 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f gateway
 > 1. `docker compose pull` 只有在 CI **至少成功发布过一次镜像**之后才能拉到，全新 fork 请先推一次代码等流水线跑完，或直接用上面的 local 覆盖层本机构建。
 > 2. GHCR 包的可见性可能是 **private**（此时 `docker pull` 报 401 要求登录）。本仓库首发即继承源仓库的 public 可见性，实测匿名 `docker pull` 可直接拉取；若你的 fork 拉取被拒，到 GitHub → Packages → 该包 → Package settings → Change visibility → Public 改一次即可（**只需做一次**）。
 
-已发布镜像（v12.1.0，实测）：
+已发布镜像（实测）：
 
 | 标签 | 架构 | 来源 |
 |------|------|------|
-| `latest` / `12.1.0` / `12.1` | `linux/amd64` + `linux/arm64` | 推送 `v12.1.0` 标签 |
-| `sha-<短哈希>` | 同上（打 tag 时）/ 仅 `amd64`（日常推送时） | 每次构建 |
-| `<分支名>` | 仅 `linux/amd64` | 日常分支推送 |
+| `latest` | **`linux/amd64` + `linux/arm64`** | `main` 推送 / `v*` 标签，恒双架构 |
+| `12.1.0` / `12.1` | **`linux/amd64` + `linux/arm64`** | 推送 `v12.1.0` 标签 |
+| `sha-<短哈希>` | 双架构（`main`/tag）或仅 `amd64`（功能分支） | 每次构建 |
+| `<功能分支名>` | 仅 `linux/amd64` | 非默认分支推送 |
 
 反代与 HTTPS 仍按下面的 Nginx 配置做（`proxy_pass` 指向 `GW_BIND:GW_PORT`），并记得设 `AQUA_TRUST_PROXY_HEADERS=1`。
 
@@ -705,7 +707,7 @@ aqua-platform-open/
 - **修复（联调发现）**：统一版本号——`/healthz` 与 OpenAPI 元数据由 `11.0.0`、控制台标题与登录页由 `v10.0` 修正为 `12.1.0`
 - **修复（联调发现）**：请求日志时间戳混格式——`request_logs` 的 `created_at`/`started_at`/`completed_at` 由写入端按 `+08:00` 落库，而所有窗口边界（`utcnow`/`utcnow_minus`/`days_ago_utc`）都是 UTC `Z` 格式；这三列是 **TEXT**，过滤走字符串字典序比较，于是每个时间窗口都被向外撑开 8 小时（IP 监控 5 分钟窗变 8h05m、成功日志 3 天保留变 3d08h、"今日"统计多算约 16h）。现写入端统一走 `utcnow()`/新增的 `utc_from_ts()`，删除 `localnow()`/`localnow_ms()`/`today_start_local()` 三个本地时区助手，`_migrate_request_logs_full` 追加幂等归一化把历史 `+08:00` 行改写为 `Z`；控制台 `fmtTime()` 改为解析后按浏览器本地时区渲染（不再字符串截断），请求日志详情的三个时间字段也改经 `fmtTime` 输出
 - **容器化**：新增 `Dockerfile`（`python:3.13-slim` 多阶段构建、非 root uid 10001、`/healthz` 内建 HEALTHCHECK、CMD 不带 `--workers`）、`docker-compose.yml`（`gateway` + `postgres:17-alpine`，`depends_on: service_healthy`、命名卷 `pgdata`、日志轮转、`host.docker.internal` 映射）与 `.dockerignore`（`.env`/密钥/`.git`/`.venv` 不进镜像层）；`.env.example` 新增 Docker 小节（`GW_BIND`/`GW_PORT`/`TZ`）
-- **CI 自动构建镜像**：新增 `.github/workflows/docker-image.yml`——推送任意分支 / 打 `v*.*.*` 标签 / 向 `main` 提 PR / 手动触发时，先跑「后端单测 + 前端静态检查」两个 job，全绿才构建镜像并推送到 GHCR（`ghcr.io/<owner>/<repo>`，由 `github.repository` 推导，fork 无需改配置）。用内置 `GITHUB_TOKEN` 登录，**零 Secret 配置**；标签含分支名 / 语义版本 / `sha-<短哈希>` / `latest`（仅默认分支）；`type=gha` 层缓存；日常推送只构 `linux/amd64`，打 tag 才交叉构建 `arm64`；PR 只验证构建不推送；`provenance: false` 避免包页面出现 `unknown/unknown`
+- **CI 自动构建镜像**：新增 `.github/workflows/docker-image.yml`——推送任意分支 / 打 `v*.*.*` 标签 / 向 `main` 提 PR / 手动触发时，先跑「后端单测 + 前端静态检查」两个 job，全绿才构建镜像并推送到 GHCR（`ghcr.io/<owner>/<repo>`，由 `github.repository` 推导，fork 无需改配置）。用内置 `GITHUB_TOKEN` 登录，**零 Secret 配置**；标签含分支名 / 语义版本 / `sha-<短哈希>` / `latest`；`type=gha` 层缓存；**凡是会更新 `latest` 的构建（`main` 推送与 `v*` 标签）恒为 `linux/amd64` + `linux/arm64` 双架构**，功能分支与 PR 只构 `amd64`（QEMU 约慢 3 倍）；构建后自动 `imagetools inspect` 校验 `latest` 双架构，缺一即红灯；PR 只验证构建不推送；`provenance: false` 避免包页面出现 `unknown/unknown`
 - **预构建镜像 + local 覆盖层**：`docker-compose.yml` 的 `gateway` 改为消费预构建镜像 `${GW_IMAGE:-ghcr.io/qingdeng888/aqua-platform-open}:${GW_IMAGE_TAG:-latest}`（移除 `build` 段），部署与升级变为 `docker compose pull && docker compose up -d`；新增 `docker-compose.local.yml` 覆盖层（`build` + `image: aqua-gateway:local` + `pull_policy: build`）供本机源码构建，只重定义 `gateway`，`db`/网络/数据卷全部继承，两种方式共用同一 `pgdata` 卷可无损来回切换；`.env.example` 新增 `GW_IMAGE`/`GW_IMAGE_TAG` 两项
 - **文档（Docker 踩坑）**：bcrypt 哈希含 `$`，docker compose 会对 `env_file` 中的 `$xxx` 做变量插值，`ACU_ADMIN_PASSWORD_HASH` 不加单引号会被静默截断（`$2b$12$bdJq…` → `$2b$12.yz…`），表现为配置无误却怎么都登不上；`.env.example`、README 快速开始与上线清单均已标注单引号写法
 - **测试**：后端 105 passed（代理 URL/客户端/选路 21 个 + 代理凭据加密与三路派生隔离用例；新增 `utc_from_ts` 格式/取值 3 个 + 写库路径不得回退到本地时区写入的守卫 2 个；新增模型测试 45 个：提示词归一 / `max_tokens` 收敛 / 回复与错误提取三态 / 路由与常量契约 / `extra="forbid"` / 不外泄凭据的源码守卫）；前端静态检查 28 项（代理池动作与出网徽标守卫；新增 `fmtTime` 本地化渲染与详情页无裸时间戳守卫；新增模型测试页动作齐全、自测密钥不落盘、可中止、`innerHTML` 只写静态模板、`max_tokens` 默认值前后端一致守卫）
