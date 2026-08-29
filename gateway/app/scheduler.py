@@ -51,6 +51,7 @@ from typing import Optional, Tuple, List, Dict, Any
 import httpx
 
 from app.database import fetch_all, fetch_one, get_setting, execute
+from app.proxy_pool import build_client, proxy_pool
 from app.security import decrypt_upstream_key
 
 logger = logging.getLogger("acu.scheduler")
@@ -639,41 +640,35 @@ class SurgeScheduler:
     # ========== HTTP连接池 ==========
 
     async def _ensure_pools(self):
-        """确保连接池已创建"""
+        """确保直连池已创建（代理池客户端由 app.proxy_pool 独立管理）"""
         if self._http_pool is None or self._http_pool.is_closed:
             # 非流式池：limits 显式化；超时分项显式（connect=10/read=120），
             # 热路径请求均带 per-request timeout 覆盖（180s/慢模型300s），此处为兜底
-            limits = httpx.Limits(
+            self._http_pool = build_client(
+                None, stream=False,
                 max_connections=self.POOL_MAX_CONNECTIONS,
-                max_keepalive_connections=self.POOL_MAX_KEEPALIVE,
-                keepalive_expiry=60,
-            )
-            self._http_pool = httpx.AsyncClient(
-                timeout=httpx.Timeout(120.0, connect=10.0),
-                limits=limits,
-                http2=False,
+                max_keepalive=self.POOL_MAX_KEEPALIVE,
             )
         if self._stream_pool is None or self._stream_pool.is_closed:
             # 流式池：limits 与非流式一致；read=600 大于 per-chunk 空闲超时180秒，
             # 让 per-chunk 空闲检测先于 httpx 超时触发，确保优雅终止
-            stream_limits = httpx.Limits(
+            self._stream_pool = build_client(
+                None, stream=True,
                 max_connections=self.POOL_MAX_CONNECTIONS,
-                max_keepalive_connections=self.POOL_MAX_KEEPALIVE,
-                keepalive_expiry=60,
-            )
-            self._stream_pool = httpx.AsyncClient(
-                timeout=httpx.Timeout(600.0, connect=10.0, read=600.0),
-                limits=stream_limits,
-                http2=False,
+                max_keepalive=self.POOL_MAX_KEEPALIVE,
             )
 
-    async def get_http_pool(self) -> httpx.AsyncClient:
+    async def get_http_pool(self, key_id: Optional[str] = None) -> httpx.AsyncClient:
+        """非流式客户端：按上游密钥的代理模式返回代理客户端，未配置代理则返回直连池"""
         await self._ensure_pools()
-        return self._http_pool
+        client = await proxy_pool.get_client(key_id, stream=False)
+        return client if client is not None else self._http_pool
 
-    async def get_stream_pool(self) -> httpx.AsyncClient:
+    async def get_stream_pool(self, key_id: Optional[str] = None) -> httpx.AsyncClient:
+        """流式客户端：按上游密钥的代理模式返回代理客户端，未配置代理则返回直连池"""
         await self._ensure_pools()
-        return self._stream_pool
+        client = await proxy_pool.get_client(key_id, stream=True)
+        return client if client is not None else self._stream_pool
 
     def get_resource_status(self) -> dict:
         """获取中央智能资源状态仪表盘数据"""
@@ -690,6 +685,7 @@ class SurgeScheduler:
             "inflight_requests": sum(m.inflight_count for m in self._client_metrics.values()),
             "cooling_buckets": sum(1 for b in self._buckets.values() if b.is_cooled_down()),
             "isolated_buckets": sum(1 for b in self._buckets.values() if b.is_isolated()),
+            "proxy_pool": proxy_pool.get_status(),
         }
 
     # ========== 算法1：分桶滑动窗口计数器 ==========
@@ -2401,8 +2397,9 @@ class SurgeScheduler:
                         self._ensure_key_cached, active_keys[0]["id"], active_keys[0]["api_key_ciphertext"]
                     )
                     if api_key:
-                        await self._ensure_pools()
-                        resp = await self._http_pool.get(
+                        # 经该密钥自身的出网通道探活，避免代理专用密钥被误判
+                        client = await self.get_http_pool(active_keys[0]["id"])
+                        resp = await client.get(
                             await asyncio.to_thread(self._upstream_models_url),
                             headers={"Authorization": f"Bearer {api_key}"},
                             timeout=httpx.Timeout(10.0)
@@ -2481,8 +2478,9 @@ class SurgeScheduler:
                 continue
 
             try:
-                await self._ensure_pools()
-                resp = await self._http_pool.get(
+                # 经该密钥自身的出网通道探活，避免代理专用密钥被误判为认证失败
+                client = await self.get_http_pool(key_id)
+                resp = await client.get(
                     await asyncio.to_thread(self._upstream_models_url),
                     headers={"Authorization": f"Bearer {api_key}"},
                     timeout=httpx.Timeout(8.0),
@@ -2548,10 +2546,13 @@ class SurgeScheduler:
             if not api_key:
                 continue
             try:
+                # 经该密钥自身的出网通道探活（同步路径，本方法已在线程池中执行）
+                proxy_url = proxy_pool.resolve_url_sync(key_id)
                 resp = httpx.get(
                     models_url,
                     headers={"Authorization": f"Bearer {api_key}"},
                     timeout=8.0,
+                    proxy=proxy_url,
                 )
                 if resp.status_code == 200:
                     execute(

@@ -1,0 +1,51 @@
+# ============================================================================
+# 构建上下文裁剪：只让 gateway/ 源码与依赖清单进入镜像
+# ----------------------------------------------------------------------------
+# 首要目的是安全（.env、密钥、本地数据库转储绝不进镜像层），
+# 其次是构建速度（.venv/ 与 .git/ 体积远超源码本身）。
+# ============================================================================
+
+# 敏感配置：容器一律通过环境变量注入
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.enc
+*credential*
+*secret*.json
+*.sql
+*.pgbackup
+*.bak
+
+# 版本库与本地虚拟环境
+.git
+.gitignore
+.venv
+venv
+.venv-test
+
+# Python 缓存与测试产物
+__pycache__
+*.py[cod]
+.pytest_cache
+pytest.ini
+conftest.py
+tests
+
+# 文档与容器化文件本身（镜像内不需要）
+*.md
+docs
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# 编辑器与系统垃圾
+.idea
+.vscode
+.DS_Store
+*.swp
+*.log
+node_modules

@@ -93,27 +93,34 @@ def warmup_pool(count: int = 3) -> None:
             _put_conn(conn)
 
 
+def _fmt_utc_z(dt: datetime) -> str:
+    """把带时区的 datetime 格式化为写库统一的 UTC Z 字符串（毫秒精度）
+
+    全库时间戳只有这一种字面格式：`YYYY-MM-DDTHH:MM:SS.mmmZ`。
+    request_logs.created_at 等列为 TEXT，窗口过滤靠字符串字典序比较，
+    因此任何写入都必须经由本函数（或其上层封装），不得出现 +08:00 变体。
+    """
+    utc_dt = dt.astimezone(timezone.utc)
+    return utc_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc_dt.microsecond // 1000:03d}Z"
+
+
 def utcnow() -> str:
     """返回ISO格式UTC时间（毫秒精度，Z格式）。写库时间戳统一使用本函数"""
-    now = datetime.now(timezone.utc)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+    return _fmt_utc_z(datetime.now(timezone.utc))
 
 
 def utcnow_minus(seconds: int) -> str:
     """返回N秒前的UTC时间（Z格式，毫秒精度）——契约函数，供时间窗口查询边界使用"""
-    target = datetime.now(timezone.utc) - timedelta(seconds=seconds)
-    return target.strftime("%Y-%m-%dT%H:%M:%S.") + f"{target.microsecond // 1000:03d}Z"
+    return _fmt_utc_z(datetime.now(timezone.utc) - timedelta(seconds=seconds))
 
 
-def localnow() -> str:
-    """返回本地时间(CST+8)ISO格式（毫秒精度）"""
-    now = datetime.now(CST)
-    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}+08:00"
+def utc_from_ts(ts: float) -> str:
+    """把 Unix 时间戳（time.time() 口径）格式化为 UTC Z 字符串（毫秒精度）
 
-
-def localnow_ms() -> int:
-    """返回当前本地时间的毫秒级时间戳"""
-    return int(datetime.now(CST).timestamp() * 1000)
+    供请求日志的 started_at / completed_at 使用：这两列同样是 TEXT，
+    必须与 created_at 及一切窗口边界保持同一格式。
+    """
+    return _fmt_utc_z(datetime.fromtimestamp(ts, tz=timezone.utc))
 
 
 def today_start_utc() -> str:
@@ -125,13 +132,6 @@ def today_start_utc() -> str:
     now_cst = datetime.now(CST)
     midnight_cst = now_cst.replace(hour=0, minute=0, second=0, microsecond=0)
     return midnight_cst.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-
-def today_start_local() -> str:
-    """返回今日本地零点的ISO格式（CST）"""
-    now_cst = datetime.now(CST)
-    midnight_cst = now_cst.replace(hour=0, minute=0, second=0, microsecond=0)
-    return midnight_cst.strftime("%Y-%m-%dT%H:%M:%S.000+08:00")
 
 
 def days_ago_utc(days: int) -> str:
@@ -299,18 +299,6 @@ def init_db() -> None:
             );
         """)
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS platform_tokens (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                token_hash TEXT NOT NULL,
-                scopes TEXT NOT NULL,
-                status TEXT DEFAULT 'active',
-                created_at TEXT NOT NULL,
-                last_used_at TEXT,
-                expires_at TEXT
-            );
-        """)
-        cur.execute("""
             CREATE TABLE IF NOT EXISTS key_usage_stats (
                 key_id TEXT PRIMARY KEY,
                 total_requests INT DEFAULT 0,
@@ -372,6 +360,25 @@ def init_db() -> None:
             );
         """)
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS proxies (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                scheme TEXT NOT NULL DEFAULT 'socks5',
+                host TEXT NOT NULL,
+                port INT NOT NULL,
+                username TEXT DEFAULT '',
+                password_ciphertext TEXT DEFAULT '',
+                status TEXT DEFAULT 'active',
+                remark TEXT DEFAULT '',
+                last_check_at TEXT,
+                last_check_ok INT DEFAULT 0,
+                last_check_msg TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_proxies_status ON proxies(status);")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS ip_monitor (
                 ip TEXT PRIMARY KEY,
                 client_ids TEXT DEFAULT '[]',
@@ -405,6 +412,8 @@ def init_db() -> None:
         _migrate_request_logs_full(conn)
         # v9.2 迁移：为 clients 表添加 user_type 字段
         _migrate_clients_user_type(conn)
+        # v12.1 迁移：为 upstream_keys 表添加代理绑定字段
+        _migrate_upstream_keys_proxy(conn)
     finally:
         # v10.0 修复：归还连接到连接池而非关闭（防止连接池耗尽）
         _put_conn(conn)
@@ -454,6 +463,7 @@ def _migrate_request_logs_full(conn) -> None:
         ("error_stack", "TEXT DEFAULT ''"),
         ("business_code", "TEXT DEFAULT ''"),
         ("log_category", "TEXT DEFAULT 'normal'"),
+        ("gateway_dispatch_ms", "DOUBLE PRECISION DEFAULT 0"),  # 网关调度耗时（密钥选择，ms）
     ]
     cur = conn.cursor()
     for col_name, col_def in migrations:
@@ -470,6 +480,32 @@ def _migrate_request_logs_full(conn) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_model_created ON request_logs(model, created_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_client_status_created ON request_logs(client_id, status_code, created_at)")
     conn.commit()
+
+    _normalize_request_log_timestamps(conn)
+
+
+def _normalize_request_log_timestamps(conn) -> None:
+    """迁移：把历史 +08:00 时间戳统一改写为 UTC Z 格式（幂等）
+
+    v12.1 之前的写入路径用 localnow() 写 created_at/started_at/completed_at，
+    而所有窗口边界都是 utcnow()/days_ago_utc() 的 Z 格式。这三列是 TEXT，
+    过滤靠字典序比较，混格式会把每个时间窗口向外撑开 8 小时（IP监控的
+    5 分钟变 8h05m、成功日志 3 天保留变 3d08h、"今日"统计多算约 16h）。
+    写入端已统一为 UTC Z，此处把历史行一次性对齐；无残留行时空转。
+    """
+    cur = conn.cursor()
+    total = 0
+    for col in ("created_at", "started_at", "completed_at"):
+        cur.execute(
+            f"""UPDATE request_logs
+                SET {col} = to_char(({col}::timestamptz) AT TIME ZONE 'UTC',
+                                    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                WHERE {col} LIKE '%+08:00'"""
+        )
+        total += cur.rowcount or 0
+    conn.commit()
+    if total:
+        logger.info(f"请求日志时间戳归一化：{total} 个字段由 +08:00 改写为 UTC Z 格式")
 
 
 def seed_defaults() -> None:
@@ -488,29 +524,11 @@ def seed_defaults() -> None:
             set_setting(key, value)
 
     # 确保主密钥和网关密钥存在
-    from app.security import generate_upstream_master_key, generate_platform_key, hash_secret
+    from app.security import generate_upstream_master_key, generate_client_key
     if get_setting("upstream_master_key") is None:
         set_setting("upstream_master_key", generate_upstream_master_key())
     if get_setting("gateway_secret") is None:
-        set_setting("gateway_secret", generate_platform_key())
-
-    # 注册平台令牌（如果 AQUA_PLATFORM_TOKEN 环境变量存在且未入库）
-    platform_token = os.environ.get("AQUA_PLATFORM_TOKEN", "")
-    if platform_token:
-        token_hash = hash_secret(platform_token)
-        existing = fetch_one(
-            "SELECT id FROM platform_tokens WHERE token_hash = %s",
-            (token_hash,),
-        )
-        if not existing:
-            token_id = str(uuid.uuid4())
-            now = utcnow()
-            execute(
-                "INSERT INTO platform_tokens (id, name, token_hash, scopes, status, created_at) "
-                "VALUES (%s, %s, %s, %s, 'active', %s)",
-                (token_id, "auto_platform_token", token_hash, '["admin"]', now),
-            )
-            logger.info(f"平台令牌已自动注册: id={token_id}")
+        set_setting("gateway_secret", generate_client_key())
 
 
 def cleanup_success_logs(keep_days: int = 3, keep_error_days: int = 90) -> dict:
@@ -589,3 +607,24 @@ def _migrate_clients_user_type(conn):
         cur.execute("ALTER TABLE clients ADD COLUMN user_type TEXT DEFAULT 'old'")
         conn.commit()
         logger.info("数据库迁移: clients 表已添加 user_type 字段 (默认 'old')")
+
+
+def _migrate_upstream_keys_proxy(conn):
+    """v12.1 迁移：为 upstream_keys 表添加代理绑定字段
+
+    proxy_mode: direct=直连（默认） / bind=绑定指定代理 / rotate=代理池轮询
+    proxy_id:   proxy_mode='bind' 时指向 proxies.id
+    """
+    existing = _get_column_names(conn, "upstream_keys")
+    cur = conn.cursor()
+    added = []
+    if "proxy_mode" not in existing:
+        cur.execute("ALTER TABLE upstream_keys ADD COLUMN proxy_mode TEXT DEFAULT 'direct'")
+        added.append("proxy_mode")
+    if "proxy_id" not in existing:
+        cur.execute("ALTER TABLE upstream_keys ADD COLUMN proxy_id TEXT")
+        added.append("proxy_id")
+    if added:
+        conn.commit()
+        logger.info("数据库迁移: upstream_keys 表已添加字段 %s", ", ".join(added))
+

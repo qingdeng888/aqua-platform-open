@@ -4,11 +4,6 @@
 import pytest
 from fastapi.responses import JSONResponse
 
-from _app_path import _switch_app
-
-# gateway/app 与 platform/app 是同名 "app" 包，须先切换并清理模块缓存再导入
-_switch_app("gateway")
-
 from app.errors_v2 import (
     AquaError,
     AuthenticationError,

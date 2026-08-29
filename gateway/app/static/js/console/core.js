@@ -4,7 +4,7 @@
  * tabs/面包屑/active 态）、通用组件（toast/modal/confirm/表单弹窗/badge/统计卡/分页/
  * 加载·空·错误态）、全局事件委托。
  *
- * XSS 纪律（与 platform 管理后台同模式）：
+ * XSS 纪律：
  *  - 动态数据一律 esc() 或 textContent 输出；禁止数据进内联事件属性；
  *  - 行内按钮只带 data-act / data-id 等索引类属性，实际数据从缓存按索引读取；
  *  - 密钥/令牌明文仅在管理员主动点击 reveal/创建动作后展示，值经 .value 赋值而非属性内插。
@@ -14,22 +14,11 @@
 
 var A = '/gw/admin';
 
-// 令牌作用域常量（后端 v10.0 scope 强制；缺省为最小默认集）
-var TOKEN_SCOPES = [
-  { value: 'clients:write',   label: 'clients:write',   desc: '创建下游客户', dft: true },
-  { value: 'keys:write',      label: 'keys:write',      desc: '创建/修改客户密钥', dft: true },
-  { value: 'keys:reveal',     label: 'keys:reveal',     desc: '查看客户密钥明文', dft: true },
-  { value: 'models:read',     label: 'models:read',     desc: '读取模型状态', dft: true },
-  { value: 'clients:delete',  label: 'clients:delete',  desc: '删除下游客户', dft: false },
-  { value: 'settings:write',  label: 'settings:write',  desc: '修改网关策略', dft: false },
-  { value: 'upstreams:reveal', label: 'upstreams:reveal', desc: '查看上游密钥明文', dft: false },
-];
-
-var PN = ['dash', 'keys', 'clients', 'buckets', 'logs', 'algo', 'monitor', 'config', 'tokens', 'errors', 'commercial'];
+var PN = ['dash', 'keys', 'proxies', 'clients', 'buckets', 'logs', 'algo', 'monitor', 'config', 'errors', 'commercial', 'mtest'];
 var PT = {
-  dash: '仪表盘', keys: '上游密钥', clients: '下游客户', buckets: '桶监控',
+  dash: '仪表盘', keys: '上游密钥', proxies: '代理池', clients: '下游客户', buckets: '桶监控',
   logs: '请求日志', algo: '算法引擎', monitor: '系统监控', config: '系统配置',
-  tokens: '平台令牌', errors: '错误码', commercial: '商用检测',
+  errors: '错误码', commercial: '商用检测', mtest: '模型测试',
 };
 var ALGO_SUB = [
   { id: 'algo1', name: '滑动窗口' },
@@ -61,7 +50,7 @@ var R = {};       // 页面渲染器注册表
 var actions = {}; // 全局动作注册表（事件委托分发）
 var cache = {};   // 列表缓存（事件委托按 data-idx 取整行数据）
 
-var GW = window.GW = { A: A, S: S, R: R, actions: actions, cache: cache, TOKEN_SCOPES: TOKEN_SCOPES, PN: PN, PT: PT, ALGO_SUB: ALGO_SUB };
+var GW = window.GW = { A: A, S: S, R: R, actions: actions, cache: cache, PN: PN, PT: PT, ALGO_SUB: ALGO_SUB };
 
 function $(id) { return document.getElementById(id); }
 GW.$ = $;
@@ -85,9 +74,16 @@ function fmtLatency(ms) {
 }
 GW.fmtLatency = fmtLatency;
 
-function fmtTime(t) {
+/* 时间渲染：后端统一写 UTC Z 格式，这里转成浏览器本地时区展示。
+   withSec=true 时带秒（详情弹窗用）。无法解析的值退化为原字符串截断。 */
+function fmtTime(t, withSec) {
   if (!t) return '-';
-  return String(t).slice(0, 16).replace('T', ' ');
+  var d = new Date(String(t));
+  if (isNaN(d.getTime())) return String(t).slice(0, withSec ? 19 : 16).replace('T', ' ');
+  var p = function (n) { return n < 10 ? '0' + n : String(n); };
+  var s = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+    ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  return withSec ? s + ':' + p(d.getSeconds()) : s;
 }
 GW.fmtTime = fmtTime;
 
@@ -194,20 +190,7 @@ function formModal(o) {
     var g = document.createElement('div'); g.className = 'form-group';
     var lab = document.createElement('label'); lab.textContent = f.label; g.appendChild(lab);
 
-    if (f.type === 'scopes') {
-      var grid = document.createElement('div'); grid.className = 'scopes-grid';
-      var cbs = [];
-      (f.options || []).forEach(function (op) {
-        var item = document.createElement('label'); item.className = 'scope-item';
-        var cb = document.createElement('input'); cb.type = 'checkbox'; cb.value = op.value; cb.checked = !!op.checked;
-        var txt = document.createElement('span');
-        txt.textContent = op.label + (op.desc ? ' — ' + op.desc : '');
-        item.appendChild(cb); item.appendChild(txt);
-        grid.appendChild(item); cbs.push(cb);
-      });
-      g.appendChild(grid);
-      inputs[f.id] = { kind: 'scopes', els: cbs };
-    } else if (f.type === 'select') {
+    if (f.type === 'select') {
       var sel = document.createElement('select');
       (f.options || []).forEach(function (op) {
         var opt = document.createElement('option');
@@ -248,11 +231,7 @@ function formModal(o) {
     var vals = {};
     Object.keys(inputs).forEach(function (k) {
       var it = inputs[k];
-      if (it.kind === 'scopes') {
-        vals[k] = it.els.filter(function (c) { return c.checked; }).map(function (c) { return c.value; });
-      } else {
-        vals[k] = it.el.value.trim();
-      }
+      vals[k] = it.el.value.trim();
     });
     submit.disabled = true;
     try {

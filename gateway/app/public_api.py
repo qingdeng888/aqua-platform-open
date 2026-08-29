@@ -41,7 +41,7 @@ from pydantic import BaseModel, ConfigDict
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.database import (
-    fetch_one, fetch_all, execute, insert_audit, utcnow, localnow,
+    fetch_one, fetch_all, execute, insert_audit, utcnow,
 )
 from app.security import (
     decrypt_secret, decrypt_upstream_key, hash_secret, mask_secret,
@@ -292,8 +292,8 @@ async def fetch_upstream_models() -> list:
     key_id, api_key = select_result
 
     try:
-        await scheduler._ensure_pools()
-        client = scheduler._http_pool  # Use existing pool
+        # 按该密钥的代理模式取客户端（direct 时即调度器直连池）
+        client = await scheduler.get_http_pool(key_id)
         resp = await client.get(url, headers={"Authorization": f"Bearer {api_key}"})
         if resp.status_code == 200:
             data = resp.json()
@@ -499,7 +499,7 @@ async def _handle_stream_request(
     - 4xx: 直接返回错误响应
     - 200: 返回流式SSE响应
     """
-    pool = await scheduler.get_stream_pool()
+    pool = await scheduler.get_stream_pool(key_id)
 
     # 预检：发起请求并检查状态码，再决定是重试还是流式返回
     # : 流式请求使用600秒httpx超时（大于per-chunk空闲超时180秒）
@@ -800,7 +800,7 @@ async def _handle_nonstream_request(
     - 4xx: JSONResponse（错误）
     - 429/5xx/超时/连接错误: 抛出UpstreamRetryableError触发重试
     """
-    pool = await scheduler.get_http_pool()
+    pool = await scheduler.get_http_pool(key_id)
 
     try:
         resp = await pool.post(
@@ -1333,21 +1333,19 @@ def _log_request_sync(
         gateway_dispatch_ms = _dispatch_ms_var.get()
 
     try:
-        from app.database import localnow
-        now_str = localnow()
+        from app.database import utc_from_ts, utcnow
+        # 写库时间戳统一 UTC Z 格式（三列均为 TEXT，窗口过滤靠字典序，
+        # 与 utcnow/days_ago_utc 的 Z 边界必须同格式）
+        now_str = utcnow()
         latency_ms = round(rt * 1000, 3)
         latency_us = int(rt * 1_000_000)
 
-        # 精确的开始和结束时间（本地CST时间，毫秒精度）
+        # 精确的开始和结束时间（UTC Z 格式，毫秒精度；展示端做本地时区转换）
         started_at = ""
         completed_at = ""
         if start_ts is not None:
-            from datetime import datetime, timezone, timedelta
-            CST = timezone(timedelta(hours=8))
-            start_dt = datetime.fromtimestamp(start_ts, tz=CST)
-            end_dt = datetime.fromtimestamp(start_ts + rt, tz=CST)
-            started_at = start_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start_dt.microsecond // 1000:03d}+08:00"
-            completed_at = end_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{end_dt.microsecond // 1000:03d}+08:00"
+            started_at = utc_from_ts(start_ts)
+            completed_at = utc_from_ts(start_ts + rt)
 
         # 日志分类
         log_category = "normal"
@@ -1437,7 +1435,7 @@ async def _call_upstream_embeddings(scheduler, client_id, model, url, body):
 
     start_time = time.time()
     try:
-        pool = await scheduler.get_http_pool()
+        pool = await scheduler.get_http_pool(key_id)
         resp = await pool.post(url, headers=headers, json=body, timeout=60.0)
         rt = time.time() - start_time
 

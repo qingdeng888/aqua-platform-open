@@ -40,6 +40,30 @@ class UpstreamKey(Base):
     status: Mapped[str] = mapped_column(String, default="active")
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    # v12.1 出网通道：direct=直连 / bind=绑定代理 / rotate=代理池轮询
+    proxy_mode: Mapped[Optional[str]] = mapped_column(String, default="direct", nullable=True)
+    proxy_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+# ========== 代理池 ==========
+
+class Proxy(Base):
+    __tablename__ = "proxies"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    scheme: Mapped[str] = mapped_column(String, default="socks5")
+    host: Mapped[str] = mapped_column(String, nullable=False)
+    port: Mapped[int] = mapped_column(Integer, nullable=False)
+    username: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    password_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="active")
+    remark: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_check_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_check_ok: Mapped[int] = mapped_column(Integer, default=0)
+    last_check_msg: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
 
 # ========== 客户端 ==========
@@ -121,21 +145,6 @@ class AuditLog(Base):
     target_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-
-
-# ========== 平台令牌 ==========
-
-class PlatformToken(Base):
-    __tablename__ = "platform_tokens"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    token_hash: Mapped[str] = mapped_column(String, nullable=False)
-    scopes: Mapped[str] = mapped_column(String, nullable=False)
-    status: Mapped[str] = mapped_column(String, default="active")
-    created_at: Mapped[str] = mapped_column(String, nullable=False)
-    last_used_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    expires_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
 
 # ========== 密钥使用统计 ==========

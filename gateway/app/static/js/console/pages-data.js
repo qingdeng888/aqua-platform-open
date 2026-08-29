@@ -115,7 +115,7 @@ GW.R.keys = async function () {
     if (!list.length) { c.innerHTML = GW.emptyState('暂无上游密钥'); return; }
     var wrap = document.createElement('div');
     wrap.className = 'table-wrap card';
-    var html = '<table><thead><tr><th>名称</th><th>密钥前缀</th><th>Provider</th><th>权重</th><th>当前RPM</th><th>成功率</th><th>429</th><th>5xx</th><th>健康分</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    var html = '<table><thead><tr><th>名称</th><th>密钥前缀</th><th>Provider</th><th>出网</th><th>权重</th><th>当前RPM</th><th>成功率</th><th>429</th><th>5xx</th><th>健康分</th><th>状态</th><th>操作</th></tr></thead><tbody>';
     list.forEach(function (k, i) {
       var frozen = (k.cooled_buckets ?? 0) > 0 || (k.cooldown_remaining ?? 0) > 0 || (k.isolated_buckets ?? 0) > 0;
       var st = frozen ? badge('冷却中', 'yellow') : badge('正常', 'green');
@@ -123,6 +123,7 @@ GW.R.keys = async function () {
         '<td class="wrap-cell"><strong>' + esc(k.name || '-') + '</strong></td>' +
         '<td class="mono text-sm">' + esc(k.key_prefix || '-') + '</td>' +
         '<td>' + esc(k.provider || '-') + '</td>' +
+        '<td>' + GW.proxyModeBadge(k.proxy_mode, k.proxy_name) + '</td>' +
         '<td>' + GW.fmtNum(k.weight) + '</td>' +
         '<td>' + GW.fmtNum(k.current_rpm) + '</td>' +
         '<td>' + (k.success_rate ?? '-') + '%</td>' +
@@ -145,9 +146,60 @@ GW.R.keys = async function () {
   }
 };
 
-GW.actions['upstream-create'] = function () {
+// 出网模式徽标：direct=直连 / bind=绑定代理 / rotate=代理池轮询
+GW.proxyModeBadge = function (mode, proxyName) {
+  if (mode === 'bind') return badge('代理: ' + (proxyName || '已失效'), proxyName ? 'blue' : 'red');
+  if (mode === 'rotate') return badge('轮询', 'cyan');
+  return badge('直连', 'gray');
+};
+
+// 代理模式下拉选项（供上游密钥创建/编辑弹窗复用）
+function proxyModeOptions(cur) {
+  return [
+    { value: 'direct', label: '直连（不经代理）', selected: (cur || 'direct') === 'direct' },
+    { value: 'bind', label: '绑定指定代理', selected: cur === 'bind' },
+    { value: 'rotate', label: '代理池轮询', selected: cur === 'rotate' },
+  ];
+}
+
+// 活跃代理下拉选项；无可用代理时返回空数组
+function proxySelectOptions(list, curId) {
+  return (list || []).filter(function (p) { return p.status === 'active'; }).map(function (p) {
+    return {
+      value: p.id,
+      label: p.name + ' (' + p.scheme + '://' + p.host + ':' + p.port + (p.has_auth ? ' 认证' : '') + ')',
+      selected: p.id === curId,
+    };
+  });
+}
+
+// 读取代理池列表（失败不阻塞密钥表单，退化为仅直连可选）
+async function loadProxyOptions() {
+  try {
+    var d = await api('/proxies');
+    return (d && d.proxies) || [];
+  } catch (e) {
+    GW.toast('代理池读取失败，本次仅可选直连: ' + e.message, 'error');
+    return [];
+  }
+}
+
+// 表单值 → 出网字段（bind 必须选中具体代理）
+function buildProxyPayload(v) {
+  var mode = v.proxy_mode || 'direct';
+  if (mode === 'bind') {
+    if (!v.proxy_id) throw new Error('绑定模式必须选择一个代理，请先在「代理池」添加代理');
+    return { proxy_mode: 'bind', proxy_id: v.proxy_id };
+  }
+  return { proxy_mode: mode, proxy_id: null };
+}
+
+GW.actions['upstream-create'] = async function () {
+  var proxies = await loadProxyOptions();
+  var opts = proxySelectOptions(proxies, '');
   GW.formModal({
     title: '创建上游密钥',
+    hint: opts.length ? '出网方式选「绑定指定代理」时须同时选择代理。' : '代理池当前无活跃代理，出网方式请选「直连」。',
     fields: [
       { id: 'name', label: '名称', placeholder: '名称' },
       { id: 'api_key', label: 'API Key', placeholder: 'API 密钥' },
@@ -155,28 +207,32 @@ GW.actions['upstream-create'] = function () {
       { id: 'weight', label: '权重', type: 'number', value: 1 },
       { id: 'rpm_limit', label: 'RPM 限制', type: 'number', value: 40 },
       { id: 'switch_threshold', label: '切换阈值', type: 'number', value: 38 },
+      { id: 'proxy_mode', label: '出网方式', type: 'select', options: proxyModeOptions('direct') },
+      { id: 'proxy_id', label: '绑定代理（仅绑定模式生效）', type: 'select',
+        options: [{ value: '', label: opts.length ? '— 请选择 —' : '— 代理池为空 —', selected: true }].concat(opts) },
     ],
     submitText: '创建',
     onSubmit: async function (v) {
       if (!v.name || !v.api_key) throw new Error('名称和 API Key 不能为空');
-      await api('/upstreams', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: v.name, api_key: v.api_key, provider: v.provider || 'nvidia',
-          weight: parseInt(v.weight, 10) || 1,
-          rpm_limit: parseInt(v.rpm_limit, 10) || 40,
-          switch_threshold: parseInt(v.switch_threshold, 10) || 38,
-        }),
-      });
+      var body = {
+        name: v.name, api_key: v.api_key, provider: v.provider || 'nvidia',
+        weight: parseInt(v.weight, 10) || 1,
+        rpm_limit: parseInt(v.rpm_limit, 10) || 40,
+        switch_threshold: parseInt(v.switch_threshold, 10) || 38,
+      };
+      Object.assign(body, buildProxyPayload(v));
+      await api('/upstreams', { method: 'POST', body: JSON.stringify(body) });
       GW.toast('创建成功', 'success');
       GW.R.keys();
     },
   });
 };
 
-GW.actions['upstream-edit'] = function (ds) {
+GW.actions['upstream-edit'] = async function (ds) {
   var k = (GW.cache.keys || [])[Number(ds.idx)] || {};
-  // 后端 PUT 契约仅接受 name/weight/rpm_limit/switch_threshold/status（api_key/provider 不可改）
+  var proxies = await loadProxyOptions();
+  var opts = proxySelectOptions(proxies, k.proxy_id || '');
+  // 后端 PUT 契约接受 name/weight/rpm_limit/switch_threshold/status/proxy_mode/proxy_id
   GW.formModal({
     title: '编辑上游密钥',
     hint: 'API Key 与 Provider 创建后不可修改；如需更换请删除后重建。',
@@ -185,18 +241,20 @@ GW.actions['upstream-edit'] = function (ds) {
       { id: 'weight', label: '权重', type: 'number', value: k.weight ?? 1 },
       { id: 'rpm_limit', label: 'RPM 限制', type: 'number', value: k.rpm_limit ?? k.rpm ?? 40 },
       { id: 'switch_threshold', label: '切换阈值', type: 'number', value: k.switch_threshold ?? 38 },
+      { id: 'proxy_mode', label: '出网方式', type: 'select', options: proxyModeOptions(k.proxy_mode) },
+      { id: 'proxy_id', label: '绑定代理（仅绑定模式生效）', type: 'select',
+        options: [{ value: '', label: opts.length ? '— 请选择 —' : '— 代理池为空 —', selected: !k.proxy_id }].concat(opts) },
     ],
     submitText: '保存',
     onSubmit: async function (v) {
-      await api('/upstreams/' + encodeURIComponent(k.id), {
-        method: 'PUT',
-        body: JSON.stringify({
-          name: v.name,
-          weight: parseInt(v.weight, 10) || 1,
-          rpm_limit: parseInt(v.rpm_limit, 10) || 40,
-          switch_threshold: parseInt(v.switch_threshold, 10) || 38,
-        }),
-      });
+      var body = {
+        name: v.name,
+        weight: parseInt(v.weight, 10) || 1,
+        rpm_limit: parseInt(v.rpm_limit, 10) || 40,
+        switch_threshold: parseInt(v.switch_threshold, 10) || 38,
+      };
+      Object.assign(body, buildProxyPayload(v));
+      await api('/upstreams/' + encodeURIComponent(k.id), { method: 'PUT', body: JSON.stringify(body) });
       GW.toast('修改成功', 'success');
       GW.R.keys();
     },
@@ -243,6 +301,197 @@ GW.actions['upstream-delete'] = function (ds) {
         await api('/upstreams/' + encodeURIComponent(ds.id), { method: 'DELETE' });
         GW.toast('删除成功', 'success');
         GW.R.keys();
+      } catch (e) { GW.toast(e.message, 'error'); }
+    },
+  });
+};
+
+/* ================================================================
+ *  代理池 — GET/POST /proxies, PUT/DELETE /proxies/{id},
+ *           POST /proxies/{id}/test
+ * ================================================================ */
+GW.R.proxies = async function () {
+  var c = GW.$('content');
+  c.innerHTML = GW.spinner();
+  GW.headerActions('<button class="btn btn-primary btn-sm" data-act="proxy-create">+ 添加代理</button>');
+  try {
+    var d = await api('/proxies');
+    var list = (d && d.proxies) || [];
+    var rt = (d && d.runtime) || {};
+    GW.cache.proxies = list;
+    c.innerHTML = '';
+
+    // 活跃代理以库内 status 为准：运行时快照是惰性加载的，冷启动时为 0（snapshot_age=-1），不能当作真值
+    var activeCount = list.filter(function (p) { return p.status === 'active'; }).length;
+    var snapAge = rt.snapshot_age;
+    var snapSub = (snapAge === undefined || snapAge < 0)
+      ? '运行时快照未加载（首次选路时惰性建立）'
+      : '运行时快照 ' + rt.active_proxies + ' 个 / ' + snapAge + 's 前';
+
+    c.appendChild(GW.statGrid([
+      { label: '代理总数', value: list.length },
+      { label: '活跃代理', value: activeCount, sub: snapSub },
+      { label: '轮询模式密钥', value: (d && d.rotate_keys) || 0 },
+      { label: '复用客户端', value: rt.cached_clients || 0, sub: '按 (代理,流式) 维度复用' },
+    ]));
+
+    if (!list.length) {
+      c.insertAdjacentHTML('beforeend', GW.emptyState('代理池为空，点击右上角「添加代理」录入 SOCKS5 / HTTP 代理', '🌐'));
+      return;
+    }
+
+    var wrap = document.createElement('div');
+    wrap.className = 'table-wrap card';
+    var html = '<table><thead><tr><th>名称</th><th>协议</th><th>地址</th><th>认证</th><th>绑定密钥</th><th>状态</th><th>最近探测</th><th>操作</th></tr></thead><tbody>';
+    list.forEach(function (p, i) {
+      var st = p.status === 'active' ? badge('启用', 'green') : badge('停用', 'gray');
+      var auth = p.has_auth ? badge('账号密码', 'blue') : badge('无认证', 'gray');
+      var chk = '-';
+      if (p.last_check_at) {
+        chk = (p.last_check_ok ? badge('通', 'green') : badge('不通', 'red')) +
+          ' <span class="text-sm">' + esc(GW.fmtTime(p.last_check_at)) + '</span>';
+      }
+      html += '<tr>' +
+        '<td class="wrap-cell"><strong>' + esc(p.name || '-') + '</strong>' +
+        (p.remark ? '<div class="text-sm">' + esc(p.remark) + '</div>' : '') + '</td>' +
+        '<td>' + esc(p.scheme || '-') + '</td>' +
+        '<td class="mono text-sm">' + esc(p.host || '-') + ':' + esc(p.port) + '</td>' +
+        '<td>' + auth + (p.username ? ' <span class="mono text-sm">' + esc(p.username) + '</span>' : '') + '</td>' +
+        '<td>' + GW.fmtNum(p.bound_keys || 0) + '</td>' +
+        '<td>' + st + '</td>' +
+        '<td>' + chk + '</td>' +
+        '<td><div class="cell-actions">' +
+        '<button class="btn btn-sm" data-act="proxy-test" data-id="' + esc(p.id) + '">测试</button>' +
+        '<button class="btn btn-sm" data-act="proxy-edit" data-idx="' + i + '">编辑</button>' +
+        '<button class="btn btn-sm" data-act="proxy-toggle" data-idx="' + i + '">' + (p.status === 'active' ? '停用' : '启用') + '</button>' +
+        '<button class="btn btn-sm btn-danger" data-act="proxy-delete" data-idx="' + i + '">删除</button>' +
+        '</div></td></tr>';
+    });
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    c.appendChild(wrap);
+
+    var tip = document.createElement('p');
+    tip.className = 'form-hint';
+    tip.textContent = '代理密码加密存储、永不回显；删除代理会把绑定它的上游密钥自动回退为直连。';
+    c.appendChild(tip);
+  } catch (e) {
+    c.innerHTML = GW.errorCard(e.message);
+  }
+};
+
+function schemeOptions(cur) {
+  return ['socks5', 'socks5h', 'http', 'https'].map(function (v) {
+    return { value: v, label: v, selected: v === (cur || 'socks5') };
+  });
+}
+
+GW.actions['proxy-create'] = function () {
+  GW.formModal({
+    title: '添加代理',
+    hint: '无认证代理：用户名与密码留空即可。密码加密存储，之后不再回显。',
+    fields: [
+      { id: 'name', label: '名称', placeholder: '如 hk-node-1' },
+      { id: 'scheme', label: '协议', type: 'select', options: schemeOptions('socks5') },
+      { id: 'host', label: '地址', placeholder: 'IP 或域名' },
+      { id: 'port', label: '端口', type: 'number', value: 1080 },
+      { id: 'username', label: '用户名（可留空）', placeholder: '无认证代理留空' },
+      { id: 'password', label: '密码（可留空）', type: 'password', placeholder: '无认证代理留空' },
+      { id: 'remark', label: '备注（可选）', placeholder: '用途说明' },
+    ],
+    submitText: '添加',
+    onSubmit: async function (v) {
+      if (!v.name || !v.host) throw new Error('名称和地址不能为空');
+      var port = parseInt(v.port, 10);
+      if (!port || port < 1 || port > 65535) throw new Error('端口需为 1-65535');
+      if (v.password && !v.username) throw new Error('填写密码时必须同时填写用户名');
+      await api('/proxies', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: v.name, scheme: v.scheme, host: v.host, port: port,
+          username: v.username || null, password: v.password || null,
+          remark: v.remark || null,
+        }),
+      });
+      GW.toast('添加成功', 'success');
+      GW.R.proxies();
+    },
+  });
+};
+
+GW.actions['proxy-edit'] = function (ds) {
+  var p = (GW.cache.proxies || [])[Number(ds.idx)] || {};
+  GW.formModal({
+    title: '编辑代理',
+    hint: p.has_auth ? '密码留空表示不修改；清空用户名将同时清除已存密码（改为无认证代理）。' : '如需启用认证，请同时填写用户名与密码。',
+    fields: [
+      { id: 'name', label: '名称', value: p.name || '' },
+      { id: 'scheme', label: '协议', type: 'select', options: schemeOptions(p.scheme) },
+      { id: 'host', label: '地址', value: p.host || '' },
+      { id: 'port', label: '端口', type: 'number', value: p.port ?? 1080 },
+      { id: 'username', label: '用户名（清空即取消认证）', value: p.username || '' },
+      { id: 'password', label: '密码（留空表示不修改）', type: 'password', placeholder: p.has_auth ? '已设置，留空不改' : '未设置' },
+      { id: 'remark', label: '备注', value: p.remark || '' },
+    ],
+    submitText: '保存',
+    onSubmit: async function (v) {
+      if (!v.name || !v.host) throw new Error('名称和地址不能为空');
+      var port = parseInt(v.port, 10);
+      if (!port || port < 1 || port > 65535) throw new Error('端口需为 1-65535');
+      var body = {
+        name: v.name, scheme: v.scheme, host: v.host, port: port,
+        username: v.username, remark: v.remark,
+      };
+      // 密码字段留空 = 不修改；用户名清空时后端会同步清除已存密码
+      if (v.password) body.password = v.password;
+      await api('/proxies/' + encodeURIComponent(p.id), { method: 'PUT', body: JSON.stringify(body) });
+      GW.toast('修改成功', 'success');
+      GW.R.proxies();
+    },
+  });
+};
+
+GW.actions['proxy-toggle'] = function (ds) {
+  var p = (GW.cache.proxies || [])[Number(ds.idx)] || {};
+  var next = p.status === 'active' ? 'inactive' : 'active';
+  GW.confirmModal({
+    title: next === 'inactive' ? '确认停用' : '确认启用',
+    body: next === 'inactive'
+      ? '停用后代理立即退出轮询；绑定该代理的上游密钥将临时回退直连。'
+      : '启用后该代理立即参与轮询与绑定生效。',
+    confirmText: next === 'inactive' ? '停用' : '启用',
+    danger: next === 'inactive',
+    onConfirm: async function () {
+      try {
+        await api('/proxies/' + encodeURIComponent(p.id), { method: 'PUT', body: JSON.stringify({ status: next }) });
+        GW.toast('已' + (next === 'inactive' ? '停用' : '启用'), 'success');
+        GW.R.proxies();
+      } catch (e) { GW.toast(e.message, 'error'); }
+    },
+  });
+};
+
+GW.actions['proxy-test'] = async function (ds) {
+  GW.toast('正在测试连通性...', 'info');
+  try {
+    var r = await api('/proxies/' + encodeURIComponent(ds.id) + '/test', { method: 'POST' });
+    GW.toast((r.ok ? '连通正常: ' : '连通失败: ') + (r.message || ''), r.ok ? 'success' : 'error');
+    GW.R.proxies();
+  } catch (e) { GW.toast(e.message, 'error'); }
+};
+
+GW.actions['proxy-delete'] = function (ds) {
+  var p = (GW.cache.proxies || [])[Number(ds.idx)] || {};
+  GW.confirmModal({
+    title: '确认删除代理',
+    body: '确定要删除代理「' + (p.name || p.id) + '」吗？' +
+      (p.bound_keys ? '当前有 ' + p.bound_keys + ' 个上游密钥绑定它，删除后将自动回退为直连。' : '此操作不可撤销。'),
+    danger: true,
+    onConfirm: async function () {
+      try {
+        var r = await api('/proxies/' + encodeURIComponent(p.id), { method: 'DELETE' });
+        GW.toast(r.message || '删除成功', 'success');
+        GW.R.proxies();
       } catch (e) { GW.toast(e.message, 'error'); }
     },
   });

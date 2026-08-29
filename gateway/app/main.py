@@ -37,6 +37,7 @@ from app.middleware import setup_middleware, is_maintenance_mode, start_log_work
 from app.scheduler import get_scheduler
 from app.public_api import router as public_router
 from app.admin_api import router as admin_router, require_admin
+from app.model_test import router as model_test_router
 from app.admin_panel import create_admin
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -212,6 +213,14 @@ async def lifespan(app: FastAPI):
         await scheduler._http_pool.aclose()
     if scheduler._stream_pool and not scheduler._stream_pool.is_closed:
         await scheduler._stream_pool.aclose()
+
+    # 关闭代理池客户端
+    try:
+        from app.proxy_pool import proxy_pool
+        await proxy_pool.close_all()
+        logger.info("[网关] 代理池客户端已关闭")
+    except Exception:
+        pass
     logger.info("[网关] 服务关闭")
 
 
@@ -219,7 +228,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AQUA AI Gateway",
-    version="11.0.0",
+    version="12.1.0",
     description="多平台AI API网关 | 17算法互锁调度 | 平台适配器 | 智能路由 | 协议转换 | 运行时健康追踪",
     docs_url=None,
     redoc_url=None,
@@ -244,6 +253,7 @@ app.mount("/gw/static", StaticFiles(directory=str(STATIC_DIR)), name="gw_static"
 # 注册API路由
 app.include_router(public_router)
 app.include_router(admin_router)
+app.include_router(model_test_router)
 
 # 挂载 SQLAdmin 数据库管理面板
 admin_panel = create_admin(app)
@@ -317,7 +327,7 @@ async def healthz(request: Request):
 
     result = {
         "status": "ok",
-        "version": "11.0.0",
+        "version": "12.1.0",
         "maintenance_mode": is_maintenance_mode(),
         "degraded_mode": status["degraded_mode"],
     }
@@ -394,7 +404,7 @@ async def admin_login_page():
                  display:flex;justify-content:center;align-items:center;height:100vh;margin:0;">
         <div style="text-align:center;background:#16213e;padding:40px;border-radius:8px;">
             <h1 style="color:#00d4ff;">AQUA 管理后台</h1>
-            <p>v10.0 网关控制系统</p>
+            <p>v12.1 网关控制系统</p>
             <form id="loginForm" style="margin-top:20px;">
                 <input type="password" id="password" placeholder="管理员密码"
                     style="padding:10px;width:250px;background:#0f3460;color:#fff;border:1px solid #00d4ff;border-radius:4px;">

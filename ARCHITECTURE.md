@@ -1,7 +1,7 @@
-# AQUA AI Platform v11.0 — 项目架构文档
+# AQUA Gateway v12.0 — 项目架构文档
 
-> **版本**: v11.0（同步 2026-08 修订）
-> **最后更新**: 2026-08-27
+> **版本**: v12.0（纯中转网关形态，单服务）
+> **最后更新**: 2026-08-29
 > **语言**: 中文（简体）
 
 ---
@@ -19,29 +19,29 @@
 9. [安全体系](#9-安全体系)
 10. [管理后台](#10-管理后台)
 11. [部署运维指南](#11-部署运维指南)
+12. [代理池与出网通道](#12-代理池与出网通道)
 
 ---
 
 ## 1. 项目概述
 
-### 1.1 平台定位
+### 1.1 定位
 
-**AQUA AI Platform v10.0** 是一个**开源AI网关平台**，其核心使命是：
+**AQUA Gateway v12.0** 是一个**开源 AI 中转网关**，其核心使命是：
 
-> 将多个 NVIDIA NIM 上游密钥**池化**，为终端用户提供**统一的 OpenAI 兼容 API**。
+> 将多个 NVIDIA NIM 上游密钥**池化**，对外提供**统一的 OpenAI 兼容 API**。
 
-平台通过密钥池化技术，将分散的上游 API 密钥整合为一个高可用的统一入口，降低用户接入门槛，提升密钥利用率，并实现智能负载均衡与故障自愈。
+网关通过密钥池化技术，将分散的上游 API 密钥整合为一个高可用的统一入口，降低接入门槛，提升密钥利用率，并实现智能负载均衡与故障自愈。
 
-### 1.2 双服务架构
+### 1.2 单服务架构
 
-AQUA 采用**双服务**架构，两个独立进程各司其职：
+v12.0 起项目收敛为**单服务**形态（原 `platform/` 用户平台模块已删除）：
 
 | 服务 | 职责 | 默认端口 | 说明 |
 |------|------|----------|------|
-| **Platform** | 用户平台 | `8001` | 面向终端用户的 Web 界面：注册、登录、密钥管理、用量查看等 |
-| **Gateway** | API 网关 | `8000` | 面向第三方客户端的 OpenAI 兼容 API 入口，负责调度、转发、限流等 |
+| **Gateway** | API 网关 | `8000` | 面向第三方客户端的 OpenAI 兼容 API 入口，负责认证、调度、转发、限流、日志 |
 
-两服务通过内部平台令牌（`AQUA_PLATFORM_TOKEN`）进行服务间认证，Platform 以客户端身份调用 Gateway 的管理 API 完成密钥发放等操作。
+网关自带零构建管理控制台（`/admin`）与 SQLAdmin 数据库面板（`/gw/dbadmin`），二者共用同一管理员密码。**不存在服务间令牌**：下游密钥由管理员在控制台签发。
 
 ### 1.3 核心使命分解
 
@@ -52,7 +52,7 @@ AQUA 采用**双服务**架构，两个独立进程各司其职：
 │   密钥池化    │   统一API    │         智能调度               │
 │  N个上游密钥  │  OpenAI兼容  │     17算法互锁                 │
 │  → 1个入口    │  多协议转换   │  故障自愈 + 负载均衡            │
-│              │  IDE协议适配  │  慷慨型网关 + 龙虾文档适配       │
+│  → M个下游key │  IDE协议适配  │  慷慨型网关 + 龙虾文档适配       │
 └──────────────┴──────────────┴────────────────────────────────┘
 ```
 
@@ -72,16 +72,17 @@ AQUA 采用**双服务**架构，两个独立进程各司其职：
 | **ORM** | SQLAlchemy 2.0 async | psycopg2/asyncpg 驱动 | 模型定义与异步查询 |
 | **Admin** | SQLAdmin | >= 0.20.0 | 数据库管理后台，自动生成 CRUD |
 | **Validation** | Pydantic V2 | model_config = ConfigDict | 数据校验与序列化 |
-| **HTTP Client** | httpx | >= 0.28.0 | 异步连接池，替代 requests |
+| **HTTP Client** | httpx[socks] | >= 0.28.0 | 异步连接池，替代 requests；`[socks]` 提供代理池 SOCKS5 支持 |
 | **Encryption** | cryptography | >= 43.0.0 | Fernet 对称加密 + HKDF 密钥派生 |
 | **Retry** | tenacity | >= 8.2.0 | 指数退避重试策略，提升请求可靠性 |
-| **JWT** | python-jose | >= 3.3.0 | JWT 标准化令牌签发与验证（HS256） |
-| **Password Hash** | bcrypt | >= 4.0.0 | 用户密码哈希，12 rounds |
+| **Password Hash** | bcrypt | >= 4.0.0 | 管理员密码哈希，12 rounds |
+| **Session 签名** | itsdangerous | >= 2.1.0 | SQLAdmin 面板 Session 中间件 |
 | **PDF 解析** | pypdf | >= 4.0.0 | PDF 文档文本与表格提取 |
 | **DOCX 解析** | python-docx | >= 1.1.0 | Word 文档内容解析 |
 | **HTML 解析** | beautifulsoup4 | >= 4.12.0 | HTML 文档结构化提取 |
 | **HTML 引擎** | lxml | >= 5.0.0 | 高性能 XML/HTML 解析后端 |
-| **Template** | Jinja2 | >= 3.1.0 | HTML 模板渲染 |
+
+> 权威依赖清单以 `gateway/requirements.txt` 为准。v12.0 起网关侧**不使用 JWT**（原 `python-jose` 为 platform 用户登录所需，已随模块删除）；管理 Token 为自实现的 HMAC-SHA256 签名（`gateway/app/security.py`）。
 
 ### 2.2 技术栈关系图
 
@@ -89,8 +90,8 @@ AQUA 采用**双服务**架构，两个独立进程各司其职：
 ┌────────────────────────────────────────────────────────────────┐
 │                      Application Layer                         │
 │  ┌──────────┐  ┌──────────┐  ┌───────────┐  ┌──────────────┐ │
-│  │ FastAPI   │  │ SQLAdmin │  │ Jinja2    │  │ Lobster 文档  │ │
-│  │ (路由)    │  │ (管理后台)│  │ (模板)    │  │ 适配器        │ │
+│  │ FastAPI   │  │ SQLAdmin │  │ 零构建前端 │  │ Lobster 文档  │ │
+│  │ (路由)    │  │ (管理后台)│  │ (原生 JS) │  │ 适配器        │ │
 │  └────┬─────┘  └────┬─────┘  └───────────┘  └──────┬───────┘ │
 │       │              │                              │         │
 │  ┌────┴──────────────┴──────────────────────────────┴──────┐  │
@@ -103,8 +104,8 @@ AQUA 采用**双服务**架构，两个独立进程各司其职：
 │  └────┬─────────────┘  └────────┬────────┘  └─────────────┘  │
 │       │                       │                                │
 │  ┌────┴───────────────────────┴──────────────────────────┐    │
-│  │    cryptography (加密) + python-jose (JWT) + bcrypt   │    │
-│  │    Fernet + HKDF-SHA256    HS256    12 rounds         │    │
+│  │    cryptography (加密) + hmac/hashlib + bcrypt        │    │
+│  │    Fernet + HKDF-SHA256   HMAC-SHA256   12 rounds     │    │
 │  └────┬──────────────────────────────────────────────────┘    │
 │       │                                                        │
 │  ┌────┴────────────────────────────────────────────────────┐  │
@@ -124,26 +125,29 @@ AQUA 采用**双服务**架构，两个独立进程各司其职：
 ### 3.1 整体架构
 
 ```
-                           ┌──────────────────────────────────────────────────┐
-                           │     AQUA AI Platform v10.0       │
-                           └──────────────────────────────────────────────────┘
+                           ┌──────────────────────────────────┐
+                           │      AQUA Gateway v12.0          │
+                           └──────────────────────────────────┘
 
- ┌──────────────┐                                                    ┌──────────────────────┐
- │  用户/浏览器   │─────── HTTP ────────►  Platform (:8001)           │     IDE 工具          │
- └──────────────┘                       ┌────────────────┐           │                      │
-                                        │  用户注册/登录   │           │  Cursor / Claude Code│
-                                        │  密钥管理       │           │  Cline / Continue    │
-                                        │  用量统计       │           │  Cherry Studio       │
-                                        │  SQLAdmin      │           │  通用 IDE 插件        │
-                                        │  (/platform/   │           └──────────┬───────────┘
-                                        │   dbadmin)     │                      │
-                                        └───────┬────────┘                      │
-                                                │                   OpenAI 协议  │
-                                    AQUA_PLATFORM_TOKEN              (主链路直通)  │
-                                    (内部服务间认证)                   │
-                                                ▼                               │
-                                        ┌────────────────┐                         │
-                                        │  Gateway (:8000)│ ◄── 多协议 API ────────┘
+ ┌──────────────┐                                    ┌──────────────────────┐
+ │  管理员/浏览器  │                                    │     IDE 工具          │
+ └──────┬───────┘                                    │                      │
+        │ 管理员密码                                   │  Cursor / Claude Code│
+        │ (/admin 控制台)                              │  Cline / Continue    │
+        │                                             │  Cherry Studio       │
+        │                                             │  通用 IDE 插件        │
+        │                                             └──────────┬───────────┘
+        │                                                        │
+        │                                            OpenAI 协议  │
+        │                                            (主链路直通)  │
+        ▼                                                        │
+                                        ┌────────────────┐       │
+                                        │ Gateway (:8000)│ ◄── 多协议 API ────┘
+                                        │                │
+                                        │ ┌────────────┐ │
+                                        │ │下游密钥认证  │ │  ← Bearer sk-xxx
+                                        │ │SHA-256查库 │ │    + L1/L2 缓存
+                                        │ └────────────┘ │
                                         │                │
                                         │ ┌────────────┐ │
                                         │ │协议转换器    │ │  ← 实验性（Anthropic/Gemini）
@@ -168,6 +172,7 @@ AQUA 采用**双服务**架构，两个独立进程各司其职：
                                         │ │Adapter     │ │    LLM上下文注入
                                         │ └────────────┘ │
                                         │                │
+                                        │ 控制台 /admin   │
                                         │ Admin API      │
                                         │ (/gw/admin/*) │
                                         │ SQLAdmin       │
@@ -240,33 +245,27 @@ AQUA 采用**双服务**架构，两个独立进程各司其职：
 
 ```
  ┌──────────────────────────────────────────────────────────────┐
-│                      管理后台入口                               │
+│                      管理后台入口（单服务）                      │
 ├───────────────────────────┬──────────────────────────────────┤
-│      Gateway Admin        │        Platform Admin             │
+│      控制台 UI            │        Admin API                  │
 │                           │                                   │
-│  /gw/admin/*              │   (Platform 内置)                 │
-│  ├─ 认证                  │   ├─ 用户管理                     │
-│  ├─ 密钥管理              │   ├─ 密钥查看                     │
-│  ├─ 客户管理              │   ├─ 用量统计                     │
-│  ├─ 桶监控                │   └─ ...                         │
-│  ├─ 算法可视化面板         │                                   │
-│  ├─ 时间段对比             │                                   │
-│  ├─ 商用检测控制           │                                   │
-│  ├─ 慷慨网关状态           │                                   │
-│  ├─ NIM模型目录           │                                   │
-│  ├─ 仪表盘                │                                   │
-│  ├─ 日志                  │                                   │
-│  ├─ 策略                  │                                   │
-│  ├─ 令牌                  │                                   │
-│  ├─ 维护模式              │                                   │
-│  └─ 调试                  │                                   │
+│  /admin （登录页）        │   /gw/admin/*                     │
+│  /admin/console           │   ├─ 登录（HMAC Token 24h）        │
+│  ├─ 仪表盘                │   ├─ 上游密钥管理                  │
+│  ├─ 上游密钥              │   ├─ 下游客户/密钥管理             │
+│  ├─ 下游客户              │   ├─ 桶监控                       │
+│  ├─ 桶监控                │   ├─ 请求日志                     │
+│  ├─ 请求日志              │   ├─ 算法统计/实时                 │
+│  ├─ 算法引擎              │   ├─ 系统配置/维护模式             │
+│  ├─ 系统监控              │   ├─ 错误码                       │
+│  ├─ 系统配置              │   ├─ 商用检测                     │
+│  ├─ 错误码                │   └─ 并发/IP 监控                 │
+│  └─ 商用检测              │                                   │
 │                           │                                   │
-│  /gw/dbadmin              │   /platform/dbadmin               │
-│  (SQLAdmin-Gateway)       │   (SQLAdmin-Platform)             │
-│  数据库表 CRUD            │   数据库表 CRUD                    │
+│  /gw/dbadmin （SQLAdmin：数据库表 CRUD）                       │
 └───────────────────────────┴──────────────────────────────────┘
-        │                               │
-        └── 共用 ACU_ADMIN_PASSWORD_HASH / ACU_ADMIN_PASSWORD ──┘
+                            │
+        └── 统一认证 ACU_ADMIN_PASSWORD_HASH / ACU_ADMIN_PASSWORD ──┘
 ```
 
 ---
@@ -491,7 +490,7 @@ ConversationContext
 
 ### 6.1 集成概述
 
-AQUA AI Platform 通过 **NVIDIA NIM** (NVIDIA Inference Microservices) 提供大模型推理能力，采用 OpenAI 兼容接口标准接入。
+AQUA Gateway 通过 **NVIDIA NIM** (NVIDIA Inference Microservices) 提供大模型推理能力，采用 OpenAI 兼容接口标准接入。
 
 | 属性 | 说明 |
 |------|------|
@@ -566,7 +565,7 @@ Gateway (:8000)
 
 ### 7.1 设计理念
 
-慷慨型网关（Generous Gateway）是 AQUA AI Platform 的特色模块，旨在将**多个供应商的免费额度**聚合为统一的免费服务入口，为用户提供零成本 AI 访问能力。
+慷慨型网关（Generous Gateway）是 AQUA Gateway 的特色模块，旨在将**多个供应商的免费额度**聚合为统一的免费服务入口，为用户提供零成本 AI 访问能力。
 
 ```
 核心思路:
@@ -667,7 +666,7 @@ GenerousLoadBalancer 选择供应商
 
 ### 8.1 设计理念
 
-龙虾文档适配器（Lobster Document Adapter）是 AQUA AI Platform 的文档处理模块，支持将多种格式的文档解析后注入 LLM 上下文，实现"文档→对话"的无缝衔接。
+龙虾文档适配器（Lobster Document Adapter）是 AQUA Gateway 的文档处理模块，支持将多种格式的文档解析后注入 LLM 上下文，实现"文档→对话"的无缝衔接。
 
 > 命名由来：龙虾脱壳——文档解析如同脱去外壳，提取精华内容注入 LLM。
 
@@ -801,17 +800,17 @@ PDF/DOCX/HTML 表格
 ├─────────────────────────┬─────────────────────────────────────────┤
 │      密钥加密            │         认证与哈希                       │
 │                         │                                         │
-│  上游密钥:               │  JWT Token:                             │
-│    Fernet(HKDF-SHA256)  │    python-jose, HS256 (24h有效期)        │
-│                         │                                         │
-│  客户端密钥:             │  Admin Token:                           │
-│    Fernet(HKDF-SHA256)  │    HMAC-SHA256 (24h有效期)               │
-│                         │                                         │
-│  Platform API密钥:       │  用户密码:                               │
-│    Fernet(PLATFORM_     │    bcrypt (12 rounds)                   │
-│    ENCRYPT_KEY)         │                                         │
-│                         │  Session:                               │
-│                         │    httponly cookie, 24h有效期             │
+│  上游 NV 密钥:           │  下游客户端密钥:                         │
+│    Fernet(HKDF-SHA256)  │    SHA-256 哈希入库（认证查库用）         │
+│    salt=acu-upstream-   │                                         │
+│         key-derivation  │  Admin Token:                           │
+│                         │    HMAC-SHA256 (24h有效期)               │
+│  下游客户端密钥:          │                                         │
+│    Fernet(HKDF-SHA256)  │  管理员密码:                             │
+│    salt=acu-client-     │    bcrypt (12 rounds)                   │
+│         key-derivation  │                                         │
+│                         │  SQLAdmin Session:                      │
+│                         │    itsdangerous 签名 cookie              │
 └─────────────────────────┴─────────────────────────────────────────┘
 ```
 
@@ -826,9 +825,10 @@ PDF/DOCX/HTML 表格
       │
       ▼
  HKDF-SHA256 (派生加密密钥)
- ├── salt: 固定域分隔字符串（上游/客户端各一条派生路径，互不通用）
+ ├── salt: 固定域分隔字符串（上游/客户端/代理凭据各一条派生路径，互不通用）
  │    上游密钥:   acu-upstream-key-derivation
  │    客户端密钥:  acu-client-key-derivation
+ │    代理凭据:   acu-proxy-credential-derivation
  ├── info: 上下文信息
  └── length: 32 bytes (Fernet 要求)
       │
@@ -841,68 +841,60 @@ PDF/DOCX/HTML 表格
  存储加密密钥到数据库
 ```
 
-#### Platform API 密钥加密
+主密钥 `upstream_master_key`（32 字节 base64）存于 `settings` 表，首次启动自动生成。三条派生路径的隔离性由单测 `tests/test_gateway_security.py::TestDerivationIsolation` 守卫：任一路径的密文用其他路径解密必抛 `InvalidToken`。
 
-使用独立的 Fernet 密钥，来自环境变量 `PLATFORM_ENCRYPT_KEY`：
+#### 下游客户端密钥认证路径
+
+客户端密钥（`sk-` + 32 随机字符）在库中同时保留两种形态：
 
 ```
-PLATFORM_ENCRYPT_KEY (Fernet 格式, 环境变量)
+generate_client_key() → "sk-xxxx..."（明文仅在签发响应中返回一次）
       │
-      ▼
- Fernet(PLATFORM_ENCRYPT_KEY).encrypt(api_key)
-      │
-      ▼
- 存储加密后的 API 密钥
+      ├── SHA-256 哈希  → client_api_keys.key_hash（认证时按哈希查库，O(1)）
+      └── Fernet 密文   → client_api_keys.key_ciphertext（管理员 reveal 用）
 ```
 
-### 9.3 JWT 标准化认证
+认证入口 `authenticate_client()`（`gateway/app/public_api.py`）走「哈希查库 + L1/L2 缓存」，明文密钥不落日志、不进上游请求头。
 
-采用 **python-jose** 实现 JWT 令牌签发与验证，标准化认证流程：
+### 9.3 管理 Token（HMAC-SHA256）
+
+网关侧**不使用 JWT**。管理 Token 由 `gateway/app/security.py` 自实现，格式为 `base64url(payload).hex(hmac_sha256)`：
 
 | 属性 | 说明 |
 |------|------|
-| **库** | python-jose |
-| **算法** | HS256 (HMAC-SHA256) |
-| **有效期** | 24 小时 |
-| **载荷** | `{sub: user_id, exp: timestamp, iat: timestamp, type: token_type}` |
-| **签发** | `jose.jwt.encode(payload, secret, algorithm="HS256")` |
-| **验证** | `jose.jwt.decode(token, secret, algorithms=["HS256"])` |
+| **算法** | HMAC-SHA256（`hmac` + `hashlib`，无第三方依赖） |
+| **签名密钥** | `settings` 表中的 `gateway_secret`（首次启动自动生成） |
+| **有效期** | 24 小时（`exp - iat == 86400`） |
+| **载荷** | `{role: "admin", iat: timestamp, exp: timestamp}` |
+| **校验** | 签名比对（`hmac.compare_digest`）→ `exp` 未过期 → `role == "admin"`，任一不满足返回 `None` |
 
 ```
-用户登录/管理认证
+管理员密码 (bcrypt 校验)
        │
        ▼
-  验证密码/凭据
+  create_admin_token(secret)
        │
        ▼
-  jose.jwt.encode({
-    sub: user_id,
-    exp: now + 24h,
-    iat: now,
-    type: "admin" / "user"
-  }, JWT_SECRET, algorithm="HS256")
+  返回 Token（同时写入 admin_token cookie）
        │
        ▼
-  返回 JWT Token
+  后续请求携带: Authorization: Bearer <token> 或 cookie
        │
        ▼
-  后续请求携带: Authorization: Bearer <jwt_token>
-       │
-       ▼
-  jose.jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+  verify_admin_token(token, secret)
        │
        ├── 有效 → 放行
-       └── 过期/无效 → 401 Unauthorized
+       └── 过期/篡改/角色不符 → 401 Unauthorized
 ```
 
 ### 9.4 认证与会话
 
 | 机制 | 算法 | 有效期 | 用途 |
 |------|------|--------|------|
-| **JWT Token** | python-jose, HS256 | 24 小时 | 标准化 API 认证 |
-| **Admin Token** | HMAC-SHA256 | 24 小时 | Gateway Admin API 认证 |
-| **User Password** | bcrypt (12 rounds) | 永久（直到修改） | Platform 用户登录 |
-| **Session** | httponly cookie | 24 小时 | Platform 用户会话 |
+| **下游 API 密钥** | SHA-256 哈希查库 | 长期（可吊销） | `/v1/*` 客户端认证 |
+| **Admin Token** | HMAC-SHA256 | 24 小时 | 控制台与 `/gw/admin/*` 认证 |
+| **管理员密码** | bcrypt (12 rounds) | 由环境变量决定 | 换取 Admin Token / SQLAdmin 登录 |
+| **SQLAdmin Session** | itsdangerous 签名 cookie | 进程内有效 | `/gw/dbadmin` 面板会话 |
 
 ### 9.5 网络安全
 
@@ -911,6 +903,8 @@ PLATFORM_ENCRYPT_KEY (Fernet 格式, 环境变量)
 | **CORS** | `CORS_ALLOWED_ORIGINS` 环境变量 | 白名单域名，逗号分隔 |
 | **IP 限流** | 登录：10次/分钟 | 防暴力破解 |
 | **IP 限流** | 管理：60次/分钟 | 防管理接口滥用 |
+| **请求体上限** | 10 MB（含 chunked） | `RequestSizeLimitMiddleware` |
+| **可信代理** | `AQUA_TRUST_PROXY_HEADERS` | 直连场景忽略一切 XFF/CF 伪造头 |
 
 ### 9.6 商用检测六维度
 
@@ -952,39 +946,44 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 
 ### 9.7 安全最佳实践
 
-- ✅ 所有密钥存储前加密，永不明文持久化
-- ✅ 管理员密码不硬编码，通过环境变量注入
-- ✅ httponly cookie 防止 XSS 窃取
+- ✅ 所有密钥存储前加密，永不明文持久化（下游密钥明文仅在签发响应中返回一次）
+- ✅ 管理员密码不硬编码，通过环境变量注入；未配置时一切登录被拒绝（杜绝空密码）
+- ✅ 上游/下游/代理凭据三条 HKDF 派生路径隔离，互不通解（单测守卫）
 - ✅ CORS 白名单替代通配符
 - ✅ IP 限流防暴力破解
 - ✅ bcrypt 12 rounds 慢哈希防彩虹表
-- ✅ JWT (python-jose, HS256) 标准化令牌
+- ✅ Admin Token 恒定时间签名比对（`hmac.compare_digest`）+ 24h 过期 + 角色校验
 - ✅ Fernet + HKDF 工业级对称加密
 - ✅ 6 维度商用检测防止免费资源滥用
+- ✅ 控制台零内联事件/零内联脚本 + 全量 `esc()` 转义（由 `tests/static-smoke.mjs` 强制）
 
 ---
 
 ## 10. 管理后台
 
-### 10.1 Gateway Admin API (`/gw/admin/*`)
+### 10.1 Admin API (`/gw/admin/*`)
 
-| 端点分类 | 路径前缀 | 功能 |
+共 73 个端点，全部要求 `require_admin`（Admin Token）。按分类：
+
+| 端点分类 | 代表路径 | 功能 |
 |----------|----------|------|
-| **认证** | `/gw/admin/auth` | 管理员登录、JWT Token 签发、会话管理 |
-| **密钥管理** | `/gw/admin/keys` | 上游密钥 CRUD、启用/禁用、批量操作 |
-| **客户管理** | `/gw/admin/clients` | 客户 CRUD、配额设置、状态管理 |
-| **桶监控** | `/gw/admin/buckets` | 桶状态查看、RPM/TPM 统计、密钥分布 |
-| **算法可视化面板** | `/gw/admin/algorithms/realtime` | 17 算法实时状态可视化、参数动态调整、效果实时展示 |
-| **时间段对比** | `/gw/admin/dashboard/comparison` | 不同时间段指标对比分析（请求量/错误率/延迟） |
-| **商用检测控制** | `/gw/admin/commercial/*` | 商用检测规则配置、检测结果查看、阈值调整、标记管理 |
-| **慷慨网关状态** | `/gw/admin/generous/status` | 免费额度水位线、供应商状态、负载均衡分布、故障转移记录 |
-| **NIM模型目录** | `/gw/admin/nim/models` | NVIDIA NIM 可用模型列表、模型能力查询、模型状态监控 |
-| **仪表盘** | `/gw/admin/dashboard` | 全局概览、请求量/错误率/延迟趋势图 |
-| **日志** | `/gw/admin/logs` | 请求日志查询、过滤、导出 |
-| **策略** | `/gw/admin/policies` | 限流策略、调度策略、冷却策略配置 |
-| **令牌** | `/gw/admin/tokens` | 平台令牌管理、权限控制 |
-| **维护模式** | `/gw/admin/maintenance` | 维护模式热切换、公告设置 |
-| **调试** | `/gw/admin/debug` | 请求模拟、算法单步调试、配置检查 |
+| **认证** | `POST /gw/admin/login` | 管理员密码校验 → 签发 24h HMAC Admin Token（写入 cookie） |
+| **上游密钥** | `/gw/admin/upstreams`、`/upstreams/{id}/reveal`、`/upstreams/health-check` | 上游密钥 CRUD、明文 reveal、启停、探活、解冻、出网模式绑定 |
+| **代理池** | `/gw/admin/proxies`、`/proxies/{id}`、`/proxies/{id}/test` | 代理 CRUD（socks5/socks5h/http/https，无认证或账号密码）、启停、连通性测试 |
+| **下游客户** | `/gw/admin/clients`、`/clients/{id}/keys`、`/clients/{id}/keys/{kid}/reveal` | 客户与密钥 CRUD、签发/吊销、明文 reveal、用量查询 |
+| **桶监控** | `/gw/admin/buckets`、`/buckets/{key_id}/{model}/unfreeze` | 桶状态查看、RPM/TPM 统计、手动解冻 |
+| **算法** | `/gw/admin/algorithms/realtime`、`/algorithm-stats`、`/algorithm/{num}` | 17 算法实时状态、统计与单算法详情 |
+| **仪表盘/统计** | `/gw/admin/dashboard`、`/dashboard/comparison`、`/stats/*`、`/realtime-traffic` | 全局概览、时间段对比、趋势/延迟/错误分析 |
+| **请求日志** | `/gw/admin/request-logs`、`/request-logs/cleanup` | 日志查询、详情、汇总统计、按天清理 |
+| **商用检测** | `/gw/admin/commercial-detection`、`/commercial/*` | 检测结果、阈值/开关、白名单、封禁与解封 |
+| **慷慨网关** | `GET /gw/admin/generous/status` | 免费额度水位线、供应商状态、负载均衡分布 |
+| **模型目录** | `/gw/admin/nim/models`、`/models/status`、`/sync-models`、`/validate-models` | NIM 模型列表、状态、同步与校验 |
+| **系统监控** | `/gw/admin/system/concurrency`、`/system/ip-monitor/*` | 并发汇总、IP 监控、异常与封禁列表、手动解封 |
+| **熔断/错误** | `/gw/admin/circuit-breakers`、`/error-codes`、`/error-stats`、`/active-errors` | 熔断器状态与重置、错误码字典与统计 |
+| **配置** | `/gw/admin/settings`、`/maintenance` | 系统配置读写、维护模式热切换 |
+| **审计/调试** | `/gw/admin/audit-logs`、`/debug/test` | 管理操作审计、连通性自检 |
+
+> v12.0 起管理接口只有 **Admin Token** 一条认证路径：原 `/gw/admin/platform-tokens`（机器间令牌 + scope 授权）已彻底移除。
 
 ### 10.2 算法可视化面板
 
@@ -1033,14 +1032,15 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 
 ### 10.4 商用检测控制台
 
-`/gw/admin/commercial/*` 提供完整的商用检测管理：
+商用检测相关端点（对应控制台「商用检测」页）：
 
 | 子功能 | 路径 | 说明 |
 |--------|------|------|
-| **规则配置** | `/gw/admin/commercial/rules` | 6 维度检测规则阈值调整 |
-| **检测结果** | `/gw/admin/commercial/detections` | 已检测到的商用嫌疑记录 |
-| **标记管理** | `/gw/admin/commercial/marks` | 手动标记/解除商用标记 |
-| **统计概览** | `/gw/admin/commercial/stats` | 商用检测统计报表 |
+| **检测结果** | `GET /gw/admin/commercial-detection` | 商用嫌疑客户端列表与评分 |
+| **标记管理** | `PUT /gw/admin/commercial-detection/{client_id}` | 手动调整客户端商用标记 |
+| **封禁/解封** | `POST /gw/admin/commercial-detection/{client_id}/block`、`/unblock` | 对嫌疑客户端封禁与解封 |
+| **开关与阈值** | `GET /gw/admin/commercial/settings`、`POST /commercial/toggle`、`POST /commercial/threshold` | 检测总开关与判定阈值 |
+| **白名单** | `POST`/`DELETE /gw/admin/commercial/whitelist/{client_id}` | 白名单增删（豁免检测） |
 
 ### 10.5 慷慨网关状态面板
 
@@ -1081,10 +1081,9 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 
 ### 10.7 SQLAdmin 数据库管理
 
-| 服务 | 路径 | 功能 |
-|------|------|------|
-| **Gateway** | `/gw/dbadmin` | Gateway 数据库所有表的 CRUD 管理 |
-| **Platform** | `/platform/dbadmin` | Platform 数据库所有表的 CRUD 管理 |
+| 路径 | 功能 |
+|------|------|
+| `/gw/dbadmin` | Gateway 数据库所有表的 CRUD 管理 |
 
 SQLAdmin 提供：
 - 表浏览与数据查看
@@ -1095,15 +1094,17 @@ SQLAdmin 提供：
 
 ### 10.8 认证机制
 
-所有管理后台共用同一组管理员密码环境变量：
+所有管理入口共用同一组管理员密码环境变量：
 
 ```
 ACU_ADMIN_PASSWORD_HASH (bcrypt 哈希，优先) / ACU_ADMIN_PASSWORD (明文回退，恒定时间比较)
         │
-        ├──► Gateway Admin API  登录（要求必须配置 HASH）→ Admin Token (HMAC-SHA256, 24h)
-        ├──► Gateway SQLAdmin   同一密码认证（未配置 HASH 时回退校验明文变量）
-        └── Platform SQLAdmin  同一密码认证（同上回退逻辑）
+        ├──► Admin API /gw/admin/login（要求必须配置 HASH）→ Admin Token (HMAC-SHA256, 24h)
+        │       └─► 控制台 /admin/console 与全部 /gw/admin/* 端点
+        └──► SQLAdmin /gw/dbadmin  同一密码认证（未配置 HASH 时回退校验明文变量）
 ```
+
+**两者均未配置时一切登录被拒绝**（杜绝空密码）。
 
 ---
 
@@ -1113,44 +1114,30 @@ ACU_ADMIN_PASSWORD_HASH (bcrypt 哈希，优先) / ACU_ADMIN_PASSWORD (明文回
 
 | 变量名 | 必填 | 说明 | 示例 |
 |--------|------|------|------|
-| `ACU_ADMIN_PASSWORD_HASH` | ✅ | 管理员密码 bcrypt 哈希（优先；Gateway Admin API 必需） | `bcrypt-hash-of-password` |
+| `ACU_ADMIN_PASSWORD_HASH` | ✅ | 管理员密码 bcrypt 哈希（优先；Admin API 必需，缺失即启动报错） | `bcrypt-hash-of-password` |
 | `ACU_ADMIN_PASSWORD` | 回退 | 管理员密码明文（未配置 HASH 时 SQLAdmin 恒定时间比较回退） | `your-strong-password` |
-| `PG_PASSWORD` | ✅ | Gateway PostgreSQL 密码（缺失时 Gateway 启动即报错） | `db-password` |
-| `PG_PLATFORM_PASSWORD` | ✅ | Platform PostgreSQL 密码 | `db-password` |
-| `PG_GATEWAY_PASSWORD` | ✅ | Platform 跨库访问 Gateway 库的密码（控制台用量统计） | `db-password` |
-| `PLATFORM_ENCRYPT_KEY` | ✅ | Platform 用户 API Key 加密 Key，Fernet 格式 | `gAAAAABf...` (Fernet key) |
-| `AQUA_PLATFORM_TOKEN` | ✅ | Platform → Gateway 平台令牌，两侧必须一致 | `platform-secret-token` |
-| `JWT_SECRET_KEY` | ✅ | Platform 用户 JWT 签名密钥（HS256） | `random-secret` |
-| `ADMIN_SESSION_SECRET` | 建议 | SQLAdmin 面板 Session 密钥（两服务共用；缺失用临时值） | `random-secret` |
-| `PLATFORM_ADMIN_SESSION_SECRET` | 建议 | Platform 管理会话令牌密钥（缺失拒绝签发） | `random-secret` |
-| `CORS_ALLOWED_ORIGINS` | ❌ | CORS 白名单域名，逗号分隔 | `https://aqua.example.com,https://admin.aqua.example.com` |
-| `GW_BASE_URL` | ❌ | Platform 调用 Gateway 的地址 | `http://127.0.0.1:8000` |
-| `SESSION_COOKIE_SECURE` | ❌ | 登录 Cookie 仅 HTTPS（默认 1，生产必须） | `1` |
-| `REGISTRATION_OPEN` | ❌ | 是否开放注册（默认 1） | `1` |
+| `PG_PASSWORD` | ✅ | PostgreSQL 密码（缺失时启动即报错） | `db-password` |
+| `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` | ❌ | 数据库连接参数（默认 `localhost:5432/aqua_gateway/aqua`） | `localhost` / `5432` |
+| `ADMIN_SESSION_SECRET` | 建议 | SQLAdmin 面板 Session 签名密钥（缺失用临时随机值，重启失效） | `random-secret` |
+| `GW_DB_POOL_SIZE` | ❌ | psycopg2 连接池大小（下限 5，默认 30） | `30` |
+| `CORS_ALLOWED_ORIGINS` | ❌ | CORS 白名单域名，逗号分隔（默认 `http://localhost:8000`） | `https://api.example.com` |
 | `AQUA_TRUST_PROXY_HEADERS` | ❌ | 反代场景信任 X-Forwarded-For（反代部署设 1） | `0` |
 | `AQUA_WATCHLIST` | ❌ | 商用检测监控名单（逗号分隔客户端名） | `client-a,client-b` |
 | `AQUA_DEBUG_ERRORS` | ❌ | 错误响应调试模式（生产保持 0） | `0` |
-| `SMTP_HOST/PORT/USER/PASSWORD` | ❌ | SMTP 邮件服务（验证码/通知） | `smtp.qq.com` / `465` |
+| `LOBSTER_MAX_BYTES` | ❌ | 文档解析输入上限（字节，默认 20MB） | `20971520` |
 
-> 完整分组与生成命令见项目根目录 `.env.example`。Gateway/Platform 各自的 PG 连接组（`PG_HOST/PORT/DB/USER`、`PG_PLATFORM_*`、`PG_GATEWAY_*`）亦在 `.env.example` 中逐项列出。
+> 完整分组与生成命令见项目根目录 `.env.example`（v12.0 起共 14 项，已随 platform 模块删除 `AQUA_PLATFORM_TOKEN`、`JWT_SECRET_KEY`、`PLATFORM_ENCRYPT_KEY`、`PG_PLATFORM_*`、`PG_GATEWAY_*`、`GW_BASE_URL`、`SESSION_COOKIE_SECURE`、`REGISTRATION_OPEN`、`SMTP_*`）。
 
 > ⚠️ **安全提示**：所有包含密钥/密码的环境变量**切勿**硬编码到代码或配置文件中，应通过安全的密钥管理工具或 `.env` 文件（已加入 `.gitignore`）注入。
 
 ### 11.2 启动命令
 
-#### Gateway 服务
-
 ```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+cd gateway && uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-#### Platform 服务
-
-```bash
-uvicorn app.main:app --host 127.0.0.1 --port 8001
-```
-
-> 建议使用进程管理器（如 systemd、supervisor）管理两个服务，确保自动重启和日志管理。
+> **必须单 worker**（不加 `--workers`）：17 算法调度器为进程内状态。
+> 建议使用进程管理器（如 systemd、supervisor）管理服务，确保自动重启和日志管理。
 
 #### 生产环境示例（systemd）
 
@@ -1158,33 +1145,14 @@ uvicorn app.main:app --host 127.0.0.1 --port 8001
 # /etc/systemd/system/aqua-gateway.service
 [Unit]
 Description=AQUA Gateway
-After=network.target
+After=network.target postgresql.service
 
 [Service]
 Type=simple
 User=aqua
-WorkingDirectory=/opt/aqua-platform/gateway
-EnvironmentFile=/opt/aqua-platform/.env
-ExecStart=/opt/aqua-platform/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```ini
-# /etc/systemd/system/aqua-platform.service
-[Unit]
-Description=AQUA Platform
-After=network.target
-
-[Service]
-Type=simple
-User=aqua
-WorkingDirectory=/opt/aqua-platform/platform
-EnvironmentFile=/opt/aqua-platform/.env
-ExecStart=/opt/aqua-platform/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001
+WorkingDirectory=/opt/aqua/gateway
+EnvironmentFile=/opt/aqua/.env
+ExecStart=/opt/aqua/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 
@@ -1200,19 +1168,17 @@ WantedBy=multi-user.target
 - **部署前置**：需先创建数据库和用户（见 README 快速部署）
 
 ```
-Gateway DB:  aqua_gateway（PG_HOST/PG_PORT/PG_DB/PG_USER/PG_PASSWORD）
-Platform DB: aqua_platform（PG_PLATFORM_*）
-跨库只读:    Gateway 库（PG_GATEWAY_*，供 Platform 控制台统计）
+Gateway DB: aqua_gateway（PG_HOST/PG_PORT/PG_DB/PG_USER/PG_PASSWORD）
+            v12.0 起为唯一数据库，无跨库访问
 ```
 
 ### 11.4 健康检查
 
 ```bash
-# Gateway 健康检查
 curl http://localhost:8000/healthz
 
-# Platform 健康检查
-curl http://localhost:8001/healthz
+# 详细字段（需管理员认证）
+curl "http://localhost:8000/healthz?verbose=1" -H "Authorization: Bearer <admin_token>"
 ```
 
 返回示例：
@@ -1258,26 +1224,104 @@ curl -X POST http://localhost:8000/gw/admin/maintenance \
 | 操作 | 方法 | 说明 |
 |------|------|------|
 | 查看服务状态 | `curl http://localhost:8000/healthz` | 健康检查端点 |
-| 开启维护模式 | `/gw/admin/maintenance` API | 热切换，无需重启 |
-| 查看桶状态 | `/gw/admin/buckets` | 各桶 RPM/TPM/健康度 |
-| 查看算法状态 | `/gw/admin/algorithms/realtime` | 17 算法实时可视化 |
-| 时间段对比 | `/gw/admin/dashboard/comparison` | 指标对比分析 |
-| 查看仪表盘 | `/gw/admin/dashboard` | 全局概览与趋势 |
-| 商用检测管理 | `/gw/admin/commercial/*` | 规则/结果/标记 |
-| 慷慨网关状态 | `/gw/admin/generous/status` | 免费额度水位/供应商 |
-| NIM模型目录 | `/gw/admin/nim/models` | 可用模型与能力 |
-| 强制冷却重置 | `/gw/admin/debug` | 调试接口重置冷却状态 |
-| 数据库管理 | `/gw/dbadmin` 或 `/platform/dbadmin` | SQLAdmin CRUD |
+| 开启维护模式 | `POST /gw/admin/maintenance` | 热切换，无需重启 |
+| 查看桶状态 | `GET /gw/admin/buckets` | 各桶 RPM/TPM/健康度 |
+| 查看算法状态 | `GET /gw/admin/algorithms/realtime` | 17 算法实时可视化 |
+| 时间段对比 | `GET /gw/admin/dashboard/comparison` | 指标对比分析 |
+| 查看仪表盘 | `GET /gw/admin/dashboard` | 全局概览与趋势 |
+| 商用检测管理 | `/gw/admin/commercial-detection`、`/commercial/*` | 结果/阈值/白名单/封禁 |
+| 慷慨网关状态 | `GET /gw/admin/generous/status` | 免费额度水位/供应商 |
+| NIM模型目录 | `GET /gw/admin/nim/models` | 可用模型与能力 |
+| 解冻桶/密钥 | `POST /gw/admin/buckets/{key_id}/{model}/unfreeze`、`/upstreams/{key_id}/unfreeze` | 手动解除冷却/冻结 |
+| 熔断器重置 | `POST /gw/admin/circuit-breakers/reset` | 手动复位熔断状态 |
+| 代理池管理 | `/gw/admin/proxies`、`POST /proxies/{id}/test` | 代理增删改查、启停与连通性测试 |
+| 清理请求日志 | `DELETE /gw/admin/request-logs/cleanup?days=N` | 手动清理（另有每 6 小时自动任务） |
+| 数据库管理 | `/gw/dbadmin` | SQLAdmin CRUD |
 
 ### 11.7 日志与监控
 
-- **请求日志**：每个 API 请求记录到 Gateway 日志，可通过 `/gw/admin/logs` 查询
+- **请求日志**：每个 API 请求记录到数据库，可通过 `/gw/admin/request-logs` 查询；成功日志保留 3 天、错误日志 90 天，调度器每 6 小时自动清理
 - **算法指标**：17 算法的实时状态可通过 `/gw/admin/algorithms/realtime` 可视化监控
 - **健康度**：全局健康度评分（A10）在仪表盘实时展示
 - **告警建议**：当健康度低于阈值时，A14 自愈引擎自动触发恢复动作
 - **慷慨网关**：免费额度水位线与供应商状态实时监控
 - **商用检测**：6 维度检测结果实时更新
+- **审计**：管理端写操作记入 `audit_logs`，可通过 `/gw/admin/audit-logs` 查询
 
 ---
 
-> **文档版本**: v11.0 | **最后更新**: 2026-08-27 | **AQUA AI Platform**
+## 12. 代理池与出网通道
+
+**职责单一**：`gateway/app/proxy_pool.py` 是「上游密钥 → 出网通道」解析与 httpx 客户端复用的**唯一**归属地。调度器、公开 API 主链路、管理端探活都只通过它取客户端。
+
+### 12.1 数据模型
+
+```
+proxies                                upstream_keys（v12.1 迁移新增两列）
+├── id / name                          ├── proxy_mode  direct | bind | rotate
+├── scheme  socks5|socks5h|http|https  └── proxy_id    proxy_mode='bind' 时指向 proxies.id
+├── host / port
+├── username              ''=无认证代理
+├── password_ciphertext   Fernet(salt=acu-proxy-credential-derivation)
+├── status  active | inactive
+└── last_check_at / last_check_ok / last_check_msg
+```
+
+迁移由 `database.py::_migrate_upstream_keys_proxy(conn)` 完成（先查 `_get_column_names` 再 `ALTER TABLE ADD COLUMN`），旧库升级无需人工干预，默认值 `direct` 保证行为不变。
+
+### 12.2 三种出网模式
+
+| 模式 | 行为 | 异常回退 |
+|------|------|----------|
+| `direct` | 直连上游（默认） | — |
+| `bind` | 绑定池内指定代理 | 该代理被删除/停用 → **回退直连 + WARNING**，不让请求失败 |
+| `rotate` | 活跃代理间 round-robin（进程内游标） | 池内无活跃代理 → 回退直连 + WARNING |
+
+删除代理时同步 `UPDATE upstream_keys SET proxy_mode='direct', proxy_id=NULL WHERE proxy_id=%s`，接口返回受影响密钥数，杜绝脏绑定。
+
+### 12.3 快照缓存与客户端复用
+
+```
+请求 → scheduler.get_http_pool(key_id)
+         └→ proxy_pool.get_client(key_id, stream)
+              ├→ resolve_url(key_id)
+              │    ├→ _ensure_snapshot()   5s TTL；过期时 to_thread 读 DB
+              │    │     ├ 活跃代理：解密密码 → build_proxy_url() → [{id,name,url}]
+              │    │     ├ 绑定关系：key_id → (proxy_mode, proxy_id)
+              │    │     └ _evict_stale_clients()  关闭已删/改配代理的客户端
+              │    └→ _select_url(key_id)   按模式选路，返回 None 表示直连
+              └→ get_client_for_url(url, stream)   按 (URL, 是否流式) 复用
+         └→ 返回 None 时 scheduler 回落自身直连池
+```
+
+- **热路径零 DB 查询**：5 秒 TTL 快照；管理端每次代理/密钥写操作调用 `proxy_pool.invalidate()` 立即失效，配置变更秒级生效
+- **客户端工厂唯一**：`build_client(proxy_url, stream)` 同时服务直连池与代理池，保证超时与连接池口径一致——非流式 `Timeout(120, connect=10)`、流式 `Timeout(600, connect=10, read=600)`、`Limits(100/20, keepalive_expiry=60)`、`http2=False`
+- **无泄漏**：快照刷新时关闭不再存在于活跃集合中的客户端；`lifespan` 关闭阶段 `proxy_pool.close_all()`
+- **单 worker 约束**：轮询游标与客户端缓存均在进程内，与调度器状态同一约束
+
+### 12.4 探活一致性（关键正确性约束）
+
+代理专用密钥若用直连探活，必然探测失败并被自动停用——这是一类自伤故障。因此**全部四条探活路径**都走密钥自己的出网通道：
+
+| 路径 | 位置 | 出网获取方式 |
+|------|------|--------------|
+| 无效模型清理（异步） | `scheduler.py` | `await self.get_http_pool(active_keys[0]["id"])`，timeout 10s |
+| 密钥健康检查（异步） | `scheduler.py` | `await self.get_http_pool(key_id)`，timeout 8s |
+| 停用密钥 30 分钟复活探测（同步） | `scheduler.py::_recheck_auto_deactivated` | `httpx.get(..., proxy=proxy_pool.resolve_url_sync(key_id))` |
+| 管理端批量探活 | `admin_api.py::/upstreams/health-check` | 逐密钥 `await scheduler.get_http_pool(key_id)` |
+
+### 12.5 凭据安全
+
+- 代理密码使用**第三条** HKDF 派生路径（salt `acu-proxy-credential-derivation`），与上游密钥、下游客户端密钥互不通解，由 `tests/test_gateway_security.py::TestDerivationIsolation` 守卫
+- 任何接口都不返回密码密文或明文，列表仅返回 `has_auth` 布尔值
+- SQLAdmin `ProxyView` 的 `form_excluded_columns` / `column_details_exclude_list` 均排除 `password_ciphertext`
+- `build_proxy_url()` 对用户名/密码做 percent-encoding，防止 `@ : /` 破坏 URL 结构导致凭据落入 host 段
+- 连通性测试解密密码仅在内存中构造一次性客户端，访问上游 `/models`；拿到任意 HTTP 状态即视为通道可用（避免把上游 401 误判为代理不通）
+
+### 12.6 依赖
+
+SOCKS 支持来自 `httpx[socks]`（`socksio`），已声明于 `gateway/requirements.txt`。`httpx` 0.28 使用单数 `proxy=` 参数（`proxies=` 已移除），协议白名单为 `http` / `https` / `socks5` / `socks5h`。
+
+---
+
+> **文档版本**: v12.1 | **最后更新**: 2026-08-29 | **AQUA Gateway**

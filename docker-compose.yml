@@ -1,0 +1,83 @@
+# ============================================================================
+# AQUA Gateway 容器编排：gateway（网关）+ db（PostgreSQL 17）
+# ----------------------------------------------------------------------------
+# 用法：
+#   cp .env.example .env   # 填 ACU_ADMIN_PASSWORD_HASH 与 PG_PASSWORD
+#   docker compose up -d --build
+#   docker compose logs -f gateway
+#
+# 变量取值来自同目录 .env（compose 自动加载）。
+# 已有外部数据库时：删掉下面的 db 服务与 depends_on，把 gateway 的
+# PG_HOST 改成实际地址（宿主机数据库用 host.docker.internal）。
+# ============================================================================
+
+name: aqua-gateway
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PG_DB:-aqua_gateway}
+      POSTGRES_USER: ${PG_USER:-aqua}
+      # 必填：缺失时 compose 直接报错退出，避免起一个空密码库
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?PG_PASSWORD 未设置，请先在 .env 中填写}
+      # 库内时区固定 UTC：网关写库时间戳统一为 UTC Z 格式，展示端做本地化
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-aqua} -d ${PG_DB:-aqua_gateway}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    # 默认不对外暴露 5432（同网络内 gateway 直接用服务名访问）。
+    # 需要用 psql/图形工具连进来调试时再放开，且只绑本机：
+    # ports:
+    #   - "127.0.0.1:${PG_EXPOSE_PORT:-5432}:5432"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aqua-gateway:12.1.0
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 覆盖 .env 中的裸机取值：compose 网络内数据库主机名恒为服务名 db
+      PG_HOST: db
+      PG_PORT: "5432"
+      # 只影响容器日志的时间显示；写库时间戳恒为 UTC Z
+      TZ: ${TZ:-Asia/Shanghai}
+    depends_on:
+      db:
+        condition: service_healthy
+    # 容器内固定 8000；宿主侧监听地址与端口由 .env 控制
+    # （GW_BIND=127.0.0.1 仅本机可访；0.0.0.0 对外暴露，请自行加反代/防火墙）
+    ports:
+      - "${GW_BIND:-127.0.0.1}:${GW_PORT:-8000}:8000"
+    extra_hosts:
+      # 容器内用 host.docker.internal 访问宿主机（宿主上的代理池节点、外部数据库等）
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    # 硬约束：调度器算法状态与代理池轮询游标都在进程内，
+    # 只能单实例单 worker（勿 docker compose up --scale gateway=N）
+    deploy:
+      replicas: 1
+
+volumes:
+  pgdata:

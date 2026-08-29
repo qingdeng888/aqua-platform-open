@@ -4,6 +4,7 @@
 端点分组：
 - 管理员认证: /gw/admin/login
 - 上游密钥管理: /gw/admin/upstreams
+- 代理池管理: /gw/admin/proxies
 - 下游客户管理: /gw/admin/clients
 - 复合桶监控: /gw/admin/buckets
 - 算法引擎统计: /gw/admin/algorithm-stats
@@ -11,20 +12,18 @@
 - 请求日志: /gw/admin/request-logs
 - 审计日志: /gw/admin/audit-logs
 - 网关策略: /gw/admin/settings
-- 平台令牌: /gw/admin/platform-tokens
 - 维护模式: /gw/admin/maintenance
 - 商用识别: /gw/admin/commercial-detection
 - 接口调试: /gw/admin/debug/test
 """
 import asyncio
-import json
 import os
 import bcrypt
 import time
 import uuid
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List
+from typing import Optional
 
 from fastapi import APIRouter, Request, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -32,14 +31,16 @@ from pydantic import BaseModel, ConfigDict
 
 from app.database import (
     init_db, fetch_one, fetch_all, execute, get_setting, set_setting,
-    insert_audit, utcnow, localnow, today_start_utc, days_ago_utc,
+    insert_audit, utcnow, today_start_utc, days_ago_utc,
     cleanup_success_logs,
 )
 from app.security import (
-    encrypt_upstream_key, decrypt_upstream_key, generate_platform_key,
+    encrypt_upstream_key, decrypt_upstream_key, generate_client_key,
     encrypt_secret, decrypt_secret, hash_secret, mask_secret,
-    create_admin_token, verify_admin_token,
-    generate_platform_token,
+    create_admin_token, verify_admin_token, encrypt_proxy_secret,
+)
+from app.proxy_pool import (
+    ALLOWED_MODES, ALLOWED_SCHEMES, MODE_BIND, build_proxy_url, proxy_pool,
 )
 from app.scheduler import get_scheduler, get_threshold_for_model
 from app.public_api import _VERIFIED_WORKING_MODELS, _clear_settings_cache
@@ -71,6 +72,8 @@ class UpstreamCreateRequest(BaseModel):
     weight: int = 1
     rpm_limit: int = 40
     switch_threshold: int = 38
+    proxy_mode: str = "direct"      # direct | bind | rotate
+    proxy_id: Optional[str] = None  # proxy_mode='bind' 时必填
 
 class UpstreamUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -78,6 +81,27 @@ class UpstreamUpdateRequest(BaseModel):
     rpm_limit: Optional[int] = None
     switch_threshold: Optional[int] = None
     status: Optional[str] = None
+    proxy_mode: Optional[str] = None
+    proxy_id: Optional[str] = None
+
+class ProxyCreateRequest(BaseModel):
+    name: str
+    scheme: str = "socks5"          # socks5 | socks5h | http | https
+    host: str
+    port: int
+    username: Optional[str] = None  # 留空表示无认证代理
+    password: Optional[str] = None
+    remark: Optional[str] = None
+
+class ProxyUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    scheme: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    username: Optional[str] = None
+    password: Optional[str] = None  # 传空字符串表示清除认证信息
+    status: Optional[str] = None
+    remark: Optional[str] = None
 
 class ClientCreateRequest(BaseModel):
     name: str
@@ -95,11 +119,6 @@ class PolicyUpdateRequest(BaseModel):
     cooldown_seconds: Optional[int] = None
     switch_threshold: Optional[int] = None
 
-class PlatformTokenCreateRequest(BaseModel):
-    name: str
-    scopes: Optional[List[str]] = None  # 缺省时使用 DEFAULT_PLATFORM_SCOPES（见下方）
-    expires_at: Optional[str] = None
-
 class DebugChatRequest(BaseModel):
     api_key: str
     model: str
@@ -111,7 +130,7 @@ class DebugChatRequest(BaseModel):
 # ========== 认证依赖 ==========
 
 async def require_admin(request: Request):
-    """验证管理员Token或平台令牌"""
+    """验证管理员Token"""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:]
@@ -123,71 +142,10 @@ async def require_admin(request: Request):
             "message": "未登录", "type": "unauthorized", "code": "no_token"
         })
 
-    # 平台令牌鉴权（apt_ 前缀）
-    if token.startswith("apt_"):
-        token_hash = hash_secret(token)
-        row = await asyncio.to_thread(
-            fetch_one,
-            "SELECT * FROM platform_tokens WHERE token_hash = %s AND status = 'active'",
-            (token_hash,),
-        )
-        if not row:
-            raise HTTPException(status_code=401, detail={
-                "message": "平台令牌无效", "type": "unauthorized", "code": "invalid_platform_token"
-            })
-        if row["expires_at"] and row["expires_at"] < utcnow():
-            raise HTTPException(status_code=401, detail={
-                "message": "平台令牌已过期", "type": "unauthorized", "code": "expired_platform_token"
-            })
-        await asyncio.to_thread(
-            execute, "UPDATE platform_tokens SET last_used_at = %s WHERE id = %s", (utcnow(), row["id"])
-        )
-        request.state.auth_type = "platform"
-        request.state.platform_token = dict(row)
-        request.state.platform_scopes = json.loads(row["scopes"])
-        return
-
-    # 传统管理员Token鉴权
     secret = await asyncio.to_thread(get_setting, "gateway_secret")
     if not secret or not verify_admin_token(token, secret):
         raise HTTPException(status_code=401, detail={
             "message": "Token无效或已过期", "type": "unauthorized", "code": "invalid_token"
-        })
-    request.state.auth_type = "admin"
-    request.state.platform_token = None
-    request.state.platform_scopes = None
-
-
-# ========== 平台令牌scope强制（apt_令牌的最小权限控制） ==========
-
-# 敏感端点 → 所需scope映射（管理员Token不受限，仅平台令牌校验）
-SENSITIVE_SCOPES = {
-    "reveal_upstream_key": "upstreams:reveal",  # 查看上游密钥明文
-    "reveal_client_key": "keys:reveal",         # 查看客户密钥明文（平台回填/展示需要）
-    "save_settings": "settings:write",          # 修改网关策略
-    "delete_client": "clients:delete",          # 删除下游客户
-}
-
-# 新建平台令牌的默认scope（依据 platform/app/gateway_client.py 实际调用的 /gw/admin/* 端点）：
-# - clients:write  → POST /clients（创建客户，auth.py/console.py）
-# - keys:write     → POST/PUT/DELETE /clients/{id}/keys（发key核心流程）
-# - keys:reveal    → GET .../keys/{kid}/reveal（console.py/chat.py 密钥展示与本地丢失后的回填恢复）
-# - models:read    → GET /models/status（console.py 模型状态）
-# 刻意不含：clients:delete（仅platform_admin删用户时的best-effort同步）、
-# settings:write（平台从不写网关配置）、upstreams:reveal（上游密钥明文与平台无关）
-DEFAULT_PLATFORM_SCOPES = ["clients:write", "keys:write", "keys:reveal", "models:read"]
-
-
-def _require_platform_scope(request: Request, required: str):
-    """平台令牌调用敏感端点时强制校验scope，缺失返回403；管理员Token不受限"""
-    if getattr(request.state, "auth_type", None) != "platform":
-        return
-    scopes = getattr(request.state, "platform_scopes", None) or []
-    if required not in scopes:
-        raise HTTPException(status_code=403, detail={
-            "message": f"平台令牌缺少所需权限: {required}",
-            "type": "forbidden",
-            "code": "insufficient_scope",
         })
 
 
@@ -374,6 +332,251 @@ async def dashboard(request: Request):
     }
 
 
+# ========== 代理池管理 ==========
+
+async def _validate_proxy_binding(mode: Optional[str], proxy_id: Optional[str]) -> tuple:
+    """校验上游密钥的出网模式，返回规范化后的 (proxy_mode, proxy_id)
+
+    - direct/rotate：强制清空 proxy_id（避免残留脏绑定）
+    - bind：proxy_id 必填且必须存在于代理池
+    """
+    mode = (mode or "direct").strip().lower()
+    if mode not in ALLOWED_MODES:
+        raise HTTPException(status_code=400, detail=f"proxy_mode 非法，可选: {', '.join(ALLOWED_MODES)}")
+    if mode != MODE_BIND:
+        return mode, None
+    if not proxy_id:
+        raise HTTPException(status_code=400, detail="proxy_mode=bind 时必须指定 proxy_id")
+    row = await asyncio.to_thread(fetch_one, "SELECT id FROM proxies WHERE id = %s", (proxy_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="指定的代理不存在")
+    return mode, proxy_id
+
+
+def _proxy_row_to_dict(row: dict) -> dict:
+    """代理行 → 响应体：绝不返回密码密文/明文"""
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "scheme": row["scheme"],
+        "host": row["host"],
+        "port": row["port"],
+        "username": row.get("username") or "",
+        "has_auth": bool(row.get("password_ciphertext")),
+        "status": row.get("status") or "active",
+        "remark": row.get("remark") or "",
+        "last_check_at": row.get("last_check_at"),
+        "last_check_ok": bool(row.get("last_check_ok")),
+        "last_check_msg": row.get("last_check_msg") or "",
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "bound_keys": row.get("bound_keys", 0),
+    }
+
+
+@router.get("/proxies", tags=["管理员"])
+async def list_proxies(request: Request):
+    """代理池列表（含绑定该代理的上游密钥数；不回显密码）"""
+    await require_admin(request)
+    rows = await asyncio.to_thread(
+        fetch_all,
+        "SELECT p.*, (SELECT COUNT(*) FROM upstream_keys k "
+        "WHERE k.proxy_id = p.id AND k.proxy_mode = 'bind') AS bound_keys "
+        "FROM proxies p ORDER BY p.created_at"
+    )
+    rotate_keys = await asyncio.to_thread(
+        fetch_one, "SELECT COUNT(*) AS c FROM upstream_keys WHERE proxy_mode = 'rotate'"
+    )
+    return {
+        "proxies": [_proxy_row_to_dict(dict(r)) for r in rows],
+        "rotate_keys": (rotate_keys or {}).get("c", 0),
+        "runtime": proxy_pool.get_status(),
+    }
+
+
+@router.post("/proxies", tags=["管理员"])
+async def create_proxy(req: ProxyCreateRequest, request: Request):
+    """添加代理入池（socks5/socks5h/http/https，支持无认证或账号密码认证）"""
+    await require_admin(request)
+
+    scheme = (req.scheme or "socks5").strip().lower()
+    if scheme not in ALLOWED_SCHEMES:
+        raise HTTPException(status_code=400, detail=f"代理协议非法，可选: {', '.join(ALLOWED_SCHEMES)}")
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="代理名称不能为空")
+    username = (req.username or "").strip()
+    password = req.password or ""
+    if password and not username:
+        raise HTTPException(status_code=400, detail="填写密码时必须同时填写用户名")
+
+    # 借 URL 拼装做地址/端口合法性校验（失败即 400，不落库）
+    try:
+        build_proxy_url(scheme, req.host, req.port, username, password)
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    cipher = ""
+    if password:
+        master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
+        if not master_key:
+            raise HTTPException(status_code=500, detail="主密钥未配置")
+        cipher = encrypt_proxy_secret(password, master_key)
+
+    proxy_id = str(uuid.uuid4())
+    now = utcnow()
+    await asyncio.to_thread(
+        execute,
+        "INSERT INTO proxies (id, name, scheme, host, port, username, password_ciphertext, "
+        "status, remark, created_at, updated_at) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s)",
+        (proxy_id, name, scheme, req.host.strip(), int(req.port), username, cipher,
+         (req.remark or "").strip(), now, now),
+    )
+    proxy_pool.invalidate()
+
+    await asyncio.to_thread(
+        insert_audit, "create", "proxy", proxy_id,
+        f"添加代理: {name} {scheme}://{req.host}:{req.port} 认证={'有' if password else '无'}",
+    )
+    return {"id": proxy_id, "message": "创建成功"}
+
+
+@router.put("/proxies/{proxy_id}", tags=["管理员"])
+async def update_proxy(proxy_id: str, req: ProxyUpdateRequest, request: Request):
+    """编辑代理（password 传空字符串表示清除认证信息）"""
+    await require_admin(request)
+
+    existing = await asyncio.to_thread(fetch_one, "SELECT * FROM proxies WHERE id = %s", (proxy_id,))
+    if not existing:
+        raise HTTPException(status_code=404, detail="代理不存在")
+
+    merged = {
+        "scheme": (req.scheme or existing["scheme"]).strip().lower(),
+        "host": (req.host or existing["host"]).strip(),
+        "port": int(req.port if req.port is not None else existing["port"]),
+        "username": (req.username if req.username is not None else (existing.get("username") or "")).strip(),
+    }
+    if merged["scheme"] not in ALLOWED_SCHEMES:
+        raise HTTPException(status_code=400, detail=f"代理协议非法，可选: {', '.join(ALLOWED_SCHEMES)}")
+    try:
+        build_proxy_url(merged["scheme"], merged["host"], merged["port"], merged["username"], "")
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if req.status is not None and req.status not in ("active", "inactive"):
+        raise HTTPException(status_code=400, detail="status 仅支持 active / inactive")
+
+    updates = ["scheme = %s", "host = %s", "port = %s", "username = %s"]
+    params = [merged["scheme"], merged["host"], merged["port"], merged["username"]]
+    if req.name is not None:
+        if not req.name.strip():
+            raise HTTPException(status_code=400, detail="代理名称不能为空")
+        updates.append("name = %s")
+        params.append(req.name.strip())
+    if req.status is not None:
+        updates.append("status = %s")
+        params.append(req.status)
+    if req.remark is not None:
+        updates.append("remark = %s")
+        params.append(req.remark.strip())
+    if req.password is not None:
+        if req.password == "":
+            updates.append("password_ciphertext = %s")
+            params.append("")
+        else:
+            if not merged["username"]:
+                raise HTTPException(status_code=400, detail="填写密码时必须同时填写用户名")
+            master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
+            if not master_key:
+                raise HTTPException(status_code=500, detail="主密钥未配置")
+            updates.append("password_ciphertext = %s")
+            params.append(encrypt_proxy_secret(req.password, master_key))
+    # 清空用户名时同步清除密码，避免残留半套凭据
+    if req.username is not None and not merged["username"] and req.password is None:
+        updates.append("password_ciphertext = %s")
+        params.append("")
+
+    updates.append("updated_at = %s")
+    params.append(utcnow())
+    params.append(proxy_id)
+    await asyncio.to_thread(execute, f"UPDATE proxies SET {', '.join(updates)} WHERE id = %s", tuple(params))
+    proxy_pool.invalidate()
+
+    await asyncio.to_thread(insert_audit, "update", "proxy", proxy_id, f"更新代理: {existing['name']}")
+    return {"message": "更新成功"}
+
+
+@router.delete("/proxies/{proxy_id}", tags=["管理员"])
+async def delete_proxy(proxy_id: str, request: Request):
+    """删除代理（同时把绑定该代理的上游密钥回退为直连）"""
+    await require_admin(request)
+
+    existing = await asyncio.to_thread(fetch_one, "SELECT name FROM proxies WHERE id = %s", (proxy_id,))
+    if not existing:
+        raise HTTPException(status_code=404, detail="代理不存在")
+
+    bound = await asyncio.to_thread(
+        fetch_one, "SELECT COUNT(*) AS c FROM upstream_keys WHERE proxy_id = %s", (proxy_id,)
+    )
+    bound_count = (bound or {}).get("c", 0)
+    if bound_count:
+        await asyncio.to_thread(
+            execute,
+            "UPDATE upstream_keys SET proxy_mode = 'direct', proxy_id = NULL, updated_at = %s "
+            "WHERE proxy_id = %s",
+            (utcnow(), proxy_id),
+        )
+    await asyncio.to_thread(execute, "DELETE FROM proxies WHERE id = %s", (proxy_id,))
+    proxy_pool.invalidate()
+
+    await asyncio.to_thread(
+        insert_audit, "delete", "proxy", proxy_id,
+        f"删除代理: {existing['name']}，{bound_count} 个上游密钥已回退直连",
+    )
+    return {"message": f"删除成功，{bound_count} 个上游密钥已回退直连", "unbound_keys": bound_count}
+
+
+@router.post("/proxies/{proxy_id}/test", tags=["管理员"])
+async def test_proxy(proxy_id: str, request: Request):
+    """连通性测试：经该代理访问上游 /models（拿到任意 HTTP 状态即视为通道可用）"""
+    await require_admin(request)
+
+    row = await asyncio.to_thread(fetch_one, "SELECT * FROM proxies WHERE id = %s", (proxy_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="代理不存在")
+
+    password = ""
+    if row.get("password_ciphertext"):
+        master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
+        if not master_key:
+            raise HTTPException(status_code=500, detail="主密钥未配置")
+        try:
+            from app.security import decrypt_proxy_secret
+            password = decrypt_proxy_secret(row["password_ciphertext"], master_key)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"代理密码解密失败: {e}")
+
+    try:
+        proxy_url = build_proxy_url(
+            row["scheme"], row["host"], row["port"], row.get("username") or "", password
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    base_url = await asyncio.to_thread(get_setting, "upstream_base_url") or "https://integrate.api.nvidia.com/v1"
+    ok, msg = await proxy_pool.probe(proxy_url, base_url.rstrip("/") + "/models")
+
+    await asyncio.to_thread(
+        execute,
+        "UPDATE proxies SET last_check_at = %s, last_check_ok = %s, last_check_msg = %s WHERE id = %s",
+        (utcnow(), 1 if ok else 0, msg[:300], proxy_id),
+    )
+    await asyncio.to_thread(
+        insert_audit, "test", "proxy", proxy_id, f"代理连通性测试: {'成功' if ok else '失败'} {msg[:120]}"
+    )
+    return {"ok": ok, "message": msg}
+
+
 # ========== 上游密钥管理 ==========
 
 @router.get("/upstreams", tags=["管理员"])
@@ -383,8 +586,11 @@ async def list_upstreams(request: Request):
     # 显式列名：排除 api_key_ciphertext（密文不出列表接口，明文仅走 /reveal 端点）
     rows = await asyncio.to_thread(
         fetch_all,
-        "SELECT id, name, provider, key_prefix, weight, rpm_limit, switch_threshold, "
-        "status, created_at, updated_at FROM upstream_keys ORDER BY created_at"
+        "SELECT k.id, k.name, k.provider, k.key_prefix, k.weight, k.rpm_limit, "
+        "k.switch_threshold, k.status, k.created_at, k.updated_at, "
+        "COALESCE(k.proxy_mode, 'direct') AS proxy_mode, k.proxy_id, p.name AS proxy_name "
+        "FROM upstream_keys k LEFT JOIN proxies p ON p.id = k.proxy_id "
+        "ORDER BY k.created_at"
     )
     scheduler = get_scheduler()
     all_buckets = scheduler.get_bucket_stats()
@@ -429,8 +635,10 @@ async def list_upstreams(request: Request):
 
 @router.post("/upstreams", tags=["管理员"])
 async def create_upstream(req: UpstreamCreateRequest, request: Request):
-    """添加上游密钥"""
+    """添加上游密钥（可指定出网代理模式）"""
     await require_admin(request)
+
+    proxy_mode, proxy_id = await _validate_proxy_binding(req.proxy_mode, req.proxy_id)
 
     master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
     if not master_key:
@@ -443,23 +651,28 @@ async def create_upstream(req: UpstreamCreateRequest, request: Request):
     await asyncio.to_thread(
         execute,
         "INSERT INTO upstream_keys "
-        "(id, name, provider, api_key_ciphertext, key_prefix, weight, rpm_limit, switch_threshold, status, created_at, updated_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s)",
+        "(id, name, provider, api_key_ciphertext, key_prefix, weight, rpm_limit, switch_threshold, "
+        "status, created_at, updated_at, proxy_mode, proxy_id) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s)",
         (key_id, req.name, req.provider, ciphertext, mask_secret(req.api_key),
-         req.weight, req.rpm_limit, req.switch_threshold, now, now),
+         req.weight, req.rpm_limit, req.switch_threshold, now, now, proxy_mode, proxy_id),
     )
 
     # 清除调度器缓存
     scheduler = get_scheduler()
     scheduler.invalidate_key_cache(key_id)
+    proxy_pool.invalidate()
 
-    await asyncio.to_thread(insert_audit, "create", "upstream_key", key_id, f"创建上游密钥: {req.name}")
+    await asyncio.to_thread(
+        insert_audit, "create", "upstream_key", key_id,
+        f"创建上游密钥: {req.name} 出网={proxy_mode}",
+    )
     return {"id": key_id, "message": "创建成功"}
 
 
 @router.put("/upstreams/{key_id}", tags=["管理员"])
 async def update_upstream(key_id: str, req: UpstreamUpdateRequest, request: Request):
-    """编辑上游密钥"""
+    """编辑上游密钥（含出网代理模式）"""
     await require_admin(request)
 
     existing = await asyncio.to_thread(fetch_one, "SELECT * FROM upstream_keys WHERE id = %s", (key_id,))
@@ -474,6 +687,24 @@ async def update_upstream(key_id: str, req: UpstreamUpdateRequest, request: Requ
             updates.append(f"{field} = %s")
             params.append(val)
 
+    # 代理模式变更：direct/rotate 会清空 proxy_id，bind 必须给出有效 proxy_id
+    if req.proxy_mode is not None:
+        proxy_mode, proxy_id = await _validate_proxy_binding(
+            req.proxy_mode,
+            req.proxy_id if req.proxy_id is not None else existing.get("proxy_id"),
+        )
+        updates.append("proxy_mode = %s")
+        params.append(proxy_mode)
+        updates.append("proxy_id = %s")
+        params.append(proxy_id)
+    elif req.proxy_id is not None:
+        # 仅换绑代理，沿用原模式
+        proxy_mode, proxy_id = await _validate_proxy_binding(
+            existing.get("proxy_mode") or "direct", req.proxy_id
+        )
+        updates.append("proxy_id = %s")
+        params.append(proxy_id)
+
     if updates:
         updates.append("updated_at = %s")
         params.append(utcnow())
@@ -482,6 +713,7 @@ async def update_upstream(key_id: str, req: UpstreamUpdateRequest, request: Requ
 
     scheduler = get_scheduler()
     scheduler.invalidate_key_cache(key_id)
+    proxy_pool.invalidate()
 
     await asyncio.to_thread(insert_audit, "update", "upstream_key", key_id, f"更新上游密钥")
     return {"message": "更新成功"}
@@ -496,6 +728,7 @@ async def delete_upstream(key_id: str, request: Request):
 
     scheduler = get_scheduler()
     scheduler.invalidate_key_cache(key_id)
+    proxy_pool.invalidate()
 
     await asyncio.to_thread(insert_audit, "delete", "upstream_key", key_id, f"删除上游密钥")
     return {"message": "删除成功"}
@@ -517,7 +750,6 @@ async def unfreeze_upstream(key_id: str, request: Request):
 async def reveal_upstream_key(key_id: str, request: Request):
     """解密并返回上游密钥明文（仅管理员可调用，会写入审计日志）"""
     await require_admin(request)
-    _require_platform_scope(request, SENSITIVE_SCOPES["reveal_upstream_key"])
 
     row = await asyncio.to_thread(fetch_one, "SELECT name, api_key_ciphertext, key_prefix FROM upstream_keys WHERE id = %s", (key_id,))
     if not row:
@@ -551,36 +783,38 @@ async def check_upstream_keys_health(request: Request):
     health_base_url = await asyncio.to_thread(get_setting, "upstream_base_url") or "https://integrate.api.nvidia.com/v1"
     _master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
 
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        for row in rows:
-            key_id = row["id"]
-            api_key = await asyncio.to_thread(scheduler._ensure_key_cached, key_id, None)
-            if not api_key:
-                # 尝试从数据库解密
-                key_row = await asyncio.to_thread(db_fetch, "SELECT api_key_ciphertext FROM upstream_keys WHERE id = %s", (key_id,))
-                if key_row and _master_key:
-                    from app.security import decrypt_upstream_key
-                    try:
-                        api_key = decrypt_upstream_key(key_row[0]["api_key_ciphertext"], _master_key)
-                    except Exception:
-                        pass
-            if not api_key:
-                results.append({"id": key_id, "name": row["name"], "status": "unknown", "error": "无法解密密钥"})
-                continue
+    # 逐个密钥按其出网模式取客户端（代理专用密钥不能走直连，否则会被误判为不健康）
+    for row in rows:
+        key_id = row["id"]
+        api_key = await asyncio.to_thread(scheduler._ensure_key_cached, key_id, None)
+        if not api_key:
+            # 尝试从数据库解密
+            key_row = await asyncio.to_thread(db_fetch, "SELECT api_key_ciphertext FROM upstream_keys WHERE id = %s", (key_id,))
+            if key_row and _master_key:
+                from app.security import decrypt_upstream_key
+                try:
+                    api_key = decrypt_upstream_key(key_row[0]["api_key_ciphertext"], _master_key)
+                except Exception:
+                    pass
+        if not api_key:
+            results.append({"id": key_id, "name": row["name"], "status": "unknown", "error": "无法解密密钥"})
+            continue
 
-            try:
-                resp = await client.get(
-                    f"{health_base_url}/models",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                )
-                if resp.status_code == 200:
-                    results.append({"id": key_id, "name": row["name"], "status": "healthy"})
-                elif resp.status_code in (401, 403):
-                    results.append({"id": key_id, "name": row["name"], "status": "invalid", "error": f"HTTP {resp.status_code}"})
-                else:
-                    results.append({"id": key_id, "name": row["name"], "status": "unknown", "error": f"HTTP {resp.status_code}"})
-            except Exception as e:
-                results.append({"id": key_id, "name": row["name"], "status": "error", "error": str(e)[:100]})
+        try:
+            client = await scheduler.get_http_pool(key_id)
+            resp = await client.get(
+                f"{health_base_url}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=httpx.Timeout(8.0),
+            )
+            if resp.status_code == 200:
+                results.append({"id": key_id, "name": row["name"], "status": "healthy"})
+            elif resp.status_code in (401, 403):
+                results.append({"id": key_id, "name": row["name"], "status": "invalid", "error": f"HTTP {resp.status_code}"})
+            else:
+                results.append({"id": key_id, "name": row["name"], "status": "unknown", "error": f"HTTP {resp.status_code}"})
+        except Exception as e:
+            results.append({"id": key_id, "name": row["name"], "status": "error", "error": str(e)[:100]})
 
     # 汇总
     healthy = sum(1 for r in results if r["status"] == "healthy")
@@ -671,7 +905,6 @@ async def update_client(client_id: str, req: ClientUpdateRequest, request: Reque
 async def delete_client(client_id: str, request: Request):
     """删除客户"""
     await require_admin(request)
-    _require_platform_scope(request, SENSITIVE_SCOPES["delete_client"])
 
     def _delete_client_sync():
         # 小循环（2条DELETE+1条审计）整体包一次 to_thread，避免逐条调度
@@ -698,9 +931,8 @@ async def list_client_keys(client_id: str, request: Request):
 
 @router.get("/clients/{client_id}/keys/{key_id}/reveal", tags=["管理员"])
 async def reveal_client_key(client_id: str, key_id: str, request: Request):
-    """解密并返回客户密钥明文（仅限平台同步使用）"""
+    """解密并返回客户密钥明文（仅管理员可调用）"""
     await require_admin(request)
-    _require_platform_scope(request, SENSITIVE_SCOPES["reveal_client_key"])
     key_row = await asyncio.to_thread(
         fetch_one,
         "SELECT id, key_ciphertext, key_prefix, status FROM client_api_keys WHERE id=%s AND client_id=%s",
@@ -739,8 +971,8 @@ async def create_client_key(client_id: str, request: Request):
     if not master_key:
         raise HTTPException(status_code=500, detail="主密钥未配置")
 
-    # 生成平台API密钥（hash_secret 为 SHA-256，微秒级，无需 to_thread）
-    api_key = generate_platform_key()
+    # 生成下游客户端API密钥（hash_secret 为 SHA-256，微秒级，无需 to_thread）
+    api_key = generate_client_key()
     key_hash = hash_secret(api_key)
     ciphertext = encrypt_secret(api_key, master_key)
     key_id = str(uuid.uuid4())
@@ -1287,7 +1519,6 @@ async def get_settings(request: Request):
 async def save_settings(req: PolicyUpdateRequest, request: Request):
     """保存网关策略"""
     await require_admin(request)
-    _require_platform_scope(request, SENSITIVE_SCOPES["save_settings"])
 
     fields = ["upstream_base_url", "chat_path", "models_path", "cooldown_seconds", "switch_threshold"]
 
@@ -1304,65 +1535,6 @@ async def save_settings(req: PolicyUpdateRequest, request: Request):
     _clear_settings_cache()
     await asyncio.to_thread(insert_audit, "update", "settings", "", "更新网关策略")
     return {"message": "保存成功"}
-
-
-# ========== 平台令牌管理 ==========
-
-@router.get("/platform-tokens", tags=["管理员"])
-async def list_tokens(request: Request):
-    """平台令牌列表"""
-    await require_admin(request)
-    rows = await asyncio.to_thread(fetch_all, "SELECT * FROM platform_tokens ORDER BY created_at DESC")
-    result = []
-    for row in rows:
-        r = dict(row)
-        try:
-            r["scopes"] = json.loads(r["scopes"]) if isinstance(r["scopes"], str) else r["scopes"]
-        except (json.JSONDecodeError, TypeError):
-            r["scopes"] = []
-        result.append(r)
-    return result
-
-
-@router.post("/platform-tokens", tags=["管理员"])
-async def create_token(req: PlatformTokenCreateRequest, request: Request):
-    """创建平台令牌（v10.0: 强制设置过期时间，默认30天）"""
-    await require_admin(request)
-
-    token = generate_platform_token()
-    token_hash = hash_secret(token)
-    token_id = str(uuid.uuid4())
-    now = utcnow()
-
-    # 强制设置过期时间，不允许NULL（永不过期）
-    expires_at = req.expires_at or (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    # 未显式指定scopes时使用最小默认集（见 DEFAULT_PLATFORM_SCOPES 注释）
-    scopes = req.scopes if req.scopes is not None else DEFAULT_PLATFORM_SCOPES
-
-    await asyncio.to_thread(
-        execute,
-        "INSERT INTO platform_tokens "
-        "(id, name, token_hash, scopes, status, created_at, last_used_at, expires_at) "
-        "VALUES (%s, %s, %s, %s, 'active', %s, NULL, %s)",
-        (token_id, req.name, token_hash, json.dumps(scopes), now, expires_at),
-    )
-
-    await asyncio.to_thread(insert_audit, "create", "platform_token", token_id, f"创建平台令牌: {req.name}")
-    return {"id": token_id, "token": token, "message": "令牌已创建，请妥善保存（有效期至" + expires_at + "）"}
-
-
-@router.delete("/platform-tokens/{token_id}", tags=["管理员"])
-async def delete_token(token_id: str, request: Request):
-    """删除平台令牌"""
-    await require_admin(request)
-
-    def _delete_token_sync():
-        execute("DELETE FROM platform_tokens WHERE id = %s", (token_id,))
-        insert_audit("delete", "platform_token", token_id, f"删除平台令牌")
-
-    await asyncio.to_thread(_delete_token_sync)
-    return {"message": "删除成功"}
 
 
 # ========== 维护模式 ==========
@@ -1497,7 +1669,7 @@ async def validate_models(request: Request):
             for mid in in_catalog_not_upstream
         ],
         "is_synced": len(in_upstream_not_catalog) == 0 and len(in_catalog_not_upstream) == 0,
-        "last_check": time.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+        "last_check": utcnow(),  # 统一 UTC Z 格式（原为按本机时间硬贴 +08:00 后缀）
     }
 
 
@@ -2143,9 +2315,7 @@ async def get_active_errors(request: Request, max_age: int = 3600):
     return {"active_errors": get_error_tracker().get_active_errors(max_age)}
 
 
-# ========== v10.0 系统监控代理（转发到 Platform） ==========
-
-_PLATFORM_BASE = "http://127.0.0.1:8001"
+# ========== 系统监控 ==========
 
 
 @router.get("/system/concurrency", tags=["v10.0系统"])
@@ -2221,38 +2391,6 @@ async def system_ip_unblock(request: Request):
     return {"message": f"IP {ip} 已解封"}
 
 
-@router.get("/system/user-stats", tags=["v10.0系统"])
-async def system_user_stats(request: Request):
-    """用户分类统计"""
-    await require_admin(request)
-    import httpx
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{_PLATFORM_BASE}/api/user/system/user-stats",
-                timeout=5,
-            )
-            return resp.json() if resp.status_code == 200 else {"error": "platform_unavailable"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@router.get("/system/health", tags=["v10.0系统"])
-async def system_health(request: Request):
-    """系统整体健康状态"""
-    await require_admin(request)
-    import httpx
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{_PLATFORM_BASE}/api/user/system/health",
-                timeout=5,
-            )
-            return resp.json() if resp.status_code == 200 else {"error": "platform_unavailable"}
-    except Exception as e:
-        return {"error": str(e)}
-
-
 # ========== 模型列表同步 ==========
 
 @router.post("/sync-models", tags=["管理员"])
@@ -2298,18 +2436,18 @@ async def sync_upstream_models(request: Request):
         return {"error": str(e), "count": 0, "models": []}
 
 
-# ========== 客户端特殊状态查询（供平台控制台使用） ==========
+# ========== 客户端特殊状态查询 ==========
 
 @router.get("/clients/{client_id}/special-status", tags=["管理员"])
 async def get_client_special_status(client_id: str, request: Request):
-    """获取客户端的特殊状态（并发限制/标签等），用于平台控制台显示"""
+    """获取客户端的特殊状态（并发限制/标签等），用于管理控制台显示"""
     await require_admin(request)
     from app.scheduler import get_scheduler
     status = get_scheduler().get_client_special_status(client_id)
     return status
 
 
-# ========== 客户端实时并发统计（供用户控制台使用） ==========
+# ========== 客户端实时并发统计 ==========
 
 @router.get("/clients/{client_id}/concurrency-stats", tags=["管理员"])
 async def get_client_concurrency_stats(client_id: str, request: Request):

@@ -18,7 +18,6 @@ import logging
 from app.error_tracker import track_error
 from app.security import hash_secret
 from collections import deque
-from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict
 
 from fastapi import Request, HTTPException
@@ -230,8 +229,11 @@ async def _flush_logs(batch):
         from app.db_async import async_session_factory
         from sqlalchemy import text
 
-        from app.database import localnow
-        now_str = localnow()
+        from app.database import utcnow
+        # 写库时间戳统一 UTC Z 格式：request_logs.created_at 是 TEXT，
+        # 而所有窗口过滤（IP监控5分钟、日志清理3天/90天、今日统计）用的都是
+        # utcnow/days_ago_utc 的 Z 边界，字典序比较容不下 +08:00 变体
+        now_str = utcnow()
 
         async with async_session_factory() as session:
             for item in batch:
@@ -364,7 +366,7 @@ def setup_middleware(app):
     # CORS - 白名单域名，避免 * 与 credentials 同时使用
     _cors_origins = os.environ.get(
         "CORS_ALLOWED_ORIGINS",
-        "http://localhost:8001,http://localhost:8000"
+        "http://localhost:8000"
     ).split(",")
     app.add_middleware(
         CORSMiddleware,
@@ -482,7 +484,6 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         start_ts = time.time()
-        start_dt = datetime.fromtimestamp(start_ts, tz=timezone(timedelta(hours=8)))
 
         # 采集请求信息
         http_method = request.method
@@ -592,9 +593,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         latency_ms = round(rt * 1000, 3)
         latency_us = int(rt * 1_000_000)
 
-        end_dt = datetime.fromtimestamp(end_ts, tz=timezone(timedelta(hours=8)))
-        started_at = start_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start_dt.microsecond // 1000:03d}+08:00"
-        completed_at = end_dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{end_dt.microsecond // 1000:03d}+08:00"
+        # 写库时间戳统一 UTC Z 格式（与 created_at 及一切窗口边界同格式）
+        from app.database import utc_from_ts
+        started_at = utc_from_ts(start_ts)
+        completed_at = utc_from_ts(end_ts)
 
         # 提取model信息（从请求体中解析）
         model = ""

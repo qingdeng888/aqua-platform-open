@@ -5,7 +5,8 @@ Gateway security 模块纯单元测试（不依赖数据库）
 - create_admin_token / verify_admin_token（有效、过期、篡改、角色错误、密钥错误、格式非法）
 - encrypt_upstream_key / decrypt_upstream_key 往返
 - encrypt_secret / decrypt_secret（客户端）往返
-- 上游/客户端两条 HKDF 派生路径互相隔离（不同 salt 派生不同 key）
+- encrypt_proxy_secret / decrypt_proxy_secret（代理凭据）往返
+- 上游/客户端/代理三条 HKDF 派生路径互相隔离（不同 salt 派生不同 key）
 """
 import base64
 import hashlib
@@ -16,15 +17,12 @@ import time
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
 
-from _app_path import _switch_app
-
-# gateway/app 与 platform/app 是同名 "app" 包，须先切换并清理模块缓存再导入
-_switch_app("gateway")
-
 from app.security import (
     create_admin_token,
+    decrypt_proxy_secret,
     decrypt_secret,
     decrypt_upstream_key,
+    encrypt_proxy_secret,
     encrypt_secret,
     encrypt_upstream_key,
     generate_upstream_master_key,
@@ -123,8 +121,24 @@ class TestClientSecretEncryption:
         assert decrypt_secret(ct, master) == plaintext
 
 
+class TestProxySecretEncryption:
+    """代理凭据加密（HKDF salt=acu-proxy-credential-derivation）"""
+
+    def test_roundtrip(self):
+        master = generate_upstream_master_key()
+        plaintext = "p@ss w:rd/特殊字符"
+        ct = encrypt_proxy_secret(plaintext, master)
+        assert ct != plaintext
+        assert decrypt_proxy_secret(ct, master) == plaintext
+
+    def test_wrong_master_key_fails(self):
+        ct = encrypt_proxy_secret("proxy-pass", generate_upstream_master_key())
+        with pytest.raises(InvalidToken):
+            decrypt_proxy_secret(ct, generate_upstream_master_key())
+
+
 class TestDerivationIsolation:
-    """上游/客户端两条派生路径必须互相隔离：不同 salt → 不同 Fernet key → 互解必败"""
+    """上游/客户端/代理三条派生路径必须互相隔离：不同 salt → 不同 Fernet key → 互解必败"""
 
     def test_upstream_ciphertext_not_client_decryptable(self):
         master = generate_upstream_master_key()
@@ -137,3 +151,18 @@ class TestDerivationIsolation:
         ct = encrypt_secret("client-secret", master)
         with pytest.raises(InvalidToken):
             decrypt_upstream_key(ct, master)  # 上游路径解客户端密文 → InvalidToken
+
+    def test_proxy_ciphertext_not_decryptable_by_others(self):
+        master = generate_upstream_master_key()
+        ct = encrypt_proxy_secret("proxy-secret", master)
+        with pytest.raises(InvalidToken):
+            decrypt_upstream_key(ct, master)
+        with pytest.raises(InvalidToken):
+            decrypt_secret(ct, master)
+
+    def test_others_ciphertext_not_proxy_decryptable(self):
+        master = generate_upstream_master_key()
+        with pytest.raises(InvalidToken):
+            decrypt_proxy_secret(encrypt_upstream_key("u", master), master)
+        with pytest.raises(InvalidToken):
+            decrypt_proxy_secret(encrypt_secret("c", master), master)

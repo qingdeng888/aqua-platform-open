@@ -1,6 +1,6 @@
 /* AQUA Gateway 管理控制台 — pages-ops.js
  * 运维面页面：请求日志(logs) / 算法引擎(algo + 算法详情) / 系统监控(monitor) /
- *            系统配置(config) / 平台令牌(tokens) / 错误码(errors) / 商用检测(commercial)
+ *            系统配置(config) / 错误码(errors) / 商用检测(commercial)
  * 所有动态数据经 esc()/textContent 输出；行操作按钮走 data-act + cache 索引委托。
  */
 (function () {
@@ -239,8 +239,9 @@ GW.actions['log-detail'] = function (ds) {
 
       var fields = [
         ['请求ID', d.id], ['客户端ID', d.client_id], ['客户端名称', d.client_name],
-        ['上游密钥ID', d.upstream_key_id], ['请求时间', d.created_at], ['开始时间', d.started_at],
-        ['完成时间', d.completed_at], ['来源IP', d.client_ip], ['User-Agent', d.user_agent],
+        ['上游密钥ID', d.upstream_key_id], ['请求时间', GW.fmtTime(d.created_at, true)],
+        ['开始时间', GW.fmtTime(d.started_at, true)],
+        ['完成时间', GW.fmtTime(d.completed_at, true)], ['来源IP', d.client_ip], ['User-Agent', d.user_agent],
         ['请求路径', d.request_path], ['HTTP方法', d.http_method], ['模型', d.model],
         ['流式', d.is_stream ? '是' : '否'], ['Prompt Token', d.prompt_tokens],
         ['Completion Token', d.completion_tokens], ['错误类型', d.error_type],
@@ -511,7 +512,7 @@ function buildDetailTable(items, title) {
 
 /* ================================================================
  *  系统监控 — GET /system/{concurrency,ip-monitor,ip-monitor/blocked,
- *             ip-monitor/anomalies,user-stats,health},
+ *             ip-monitor/anomalies},
  *            POST /system/ip-monitor/unblock
  * ================================================================ */
 GW.R.monitor = async function () {
@@ -524,37 +525,9 @@ GW.R.monitor = async function () {
       api('/system/ip-monitor').catch(function () { return null; }),
       api('/system/ip-monitor/blocked').catch(function () { return null; }),
       api('/system/ip-monitor/anomalies').catch(function () { return null; }),
-      api('/system/user-stats').catch(function () { return null; }),
-      api('/system/health').catch(function () { return null; }),
     ]);
-    var concurrency = res[0], ipMonitor = res[1], blocked = res[2], anomalies = res[3], userStats = res[4], health = res[5];
+    var concurrency = res[0], ipMonitor = res[1], blocked = res[2], anomalies = res[3];
     c.innerHTML = '';
-
-    // 系统健康
-    if (health) {
-      var h = document.createElement('div');
-      h.className = 'card mb-12';
-      var ht = document.createElement('div');
-      ht.className = 'flex items-center justify-between';
-      var ht1 = document.createElement('span'); ht1.className = 'card-title'; ht1.style.margin = '0'; ht1.textContent = '系统健康';
-      var ht2 = document.createElement('span'); ht2.innerHTML = health.status === 'healthy' ? badge('健康', 'green') : badge('异常', 'red');
-      ht.appendChild(ht1); ht.appendChild(ht2);
-      h.appendChild(ht);
-      if (health.checks) {
-        var hw = document.createElement('div'); hw.className = 'table-wrap mt-12';
-        var hh = '<table><thead><tr><th>检查项</th><th>状态</th><th>详情</th></tr></thead><tbody>';
-        Object.keys(health.checks).forEach(function (k) {
-          var v = health.checks[k];
-          var ok = v.status ? true : (v === true);
-          hh += '<tr><td>' + esc(k) + '</td><td>' + (ok ? badge('通过', 'green') : badge('异常', 'red')) + '</td>' +
-            '<td class="text-sm wrap-cell">' + esc((v && (v.detail || v.message)) || '-') + '</td></tr>';
-        });
-        hh += '</tbody></table>';
-        hw.innerHTML = hh;
-        h.appendChild(hw);
-      }
-      c.appendChild(h);
-    }
 
     if (concurrency) {
       var t1 = document.createElement('div'); t1.className = 'section-title'; t1.textContent = '并发统计';
@@ -613,15 +586,7 @@ GW.R.monitor = async function () {
       c.appendChild(aw);
     }
 
-    if (userStats) {
-      var t5 = document.createElement('div'); t5.className = 'section-title'; t5.textContent = '用户分类统计';
-      c.appendChild(t5);
-      c.appendChild(GW.statGrid(Object.keys(userStats).map(function (k) {
-        return { label: k, value: userStats[k] };
-      })));
-    }
-
-    if (!health && !concurrency && !ipMonitor && !blocked && !anomalies && !userStats) {
+    if (!concurrency && !ipMonitor && !blocked && !anomalies) {
       c.innerHTML = GW.emptyState('暂无监控数据');
     }
   } catch (e) {
@@ -736,90 +701,6 @@ GW.actions['config-maintenance'] = function () {
         // 后端返回 {maintenance_mode: bool, message}
         GW.toast('维护模式: ' + (r.maintenance_mode ? '开启' : '关闭'), 'info');
         GW.R.config();
-      } catch (e) { GW.toast(e.message, 'error'); }
-    },
-  });
-};
-
-/* ================================================================
- *  平台令牌 — GET/POST /platform-tokens, DELETE /platform-tokens/{id}
- * ================================================================ */
-GW.R.tokens = async function () {
-  var c = GW.$('content');
-  c.innerHTML = GW.spinner();
-  GW.headerActions('<button class="btn btn-primary btn-sm" data-act="token-create">+ 创建令牌</button>');
-  try {
-    var list = await api('/platform-tokens');
-    GW.cache.tokens = list;
-    c.innerHTML = '';
-    if (!list.length) { c.innerHTML = GW.emptyState('暂无平台令牌'); return; }
-    var wrap = document.createElement('div');
-    wrap.className = 'table-wrap card';
-    var html = '<table><thead><tr><th>名称</th><th>作用域</th><th>状态</th><th>创建时间</th><th>过期时间</th><th>最后使用</th><th>操作</th></tr></thead><tbody>';
-    list.forEach(function (t) {
-      var scopes = t.scopes || [];
-      var scopeHtml = scopes.length
-        ? '<div class="badge-row">' + scopes.map(function (s) { return badge(s, 'cyan'); }).join('') + '</div>'
-        : '<span class="text-dim">-</span>';
-      var st = t.status === 'active' ? badge('活跃', 'green') : badge(t.status || '-', 'gray');
-      var expired = t.expires_at && String(t.expires_at) < new Date().toISOString().slice(0, 19) + 'Z';
-      if (expired) st = badge('已过期', 'red');
-      html += '<tr>' +
-        '<td class="wrap-cell"><strong>' + esc(t.name || '-') + '</strong></td>' +
-        '<td class="wrap-cell">' + scopeHtml + '</td>' +
-        '<td>' + st + '</td>' +
-        '<td class="text-sm text-dim">' + GW.fmtTime(t.created_at) + '</td>' +
-        '<td class="text-sm text-dim">' + GW.fmtTime(t.expires_at) + '</td>' +
-        '<td class="text-sm text-dim">' + GW.fmtTime(t.last_used_at) + '</td>' +
-        '<td><button class="btn btn-sm btn-danger" data-act="token-delete" data-id="' + esc(t.id) + '" data-name="' + esc(t.name || '') + '">删除</button></td></tr>';
-    });
-    html += '</tbody></table>';
-    wrap.innerHTML = html;
-    c.appendChild(wrap);
-  } catch (e) {
-    c.innerHTML = GW.errorCard(e.message);
-  }
-};
-
-GW.actions['token-create'] = function () {
-  GW.formModal({
-    title: '创建平台令牌',
-    hint: '默认有效期 30 天；不勾选任何作用域时后端将使用最小默认集（clients:write / keys:write / keys:reveal / models:read）。',
-    fields: [
-      { id: 'name', label: '名称', placeholder: '令牌名称' },
-      { id: 'scopes', label: '作用域（多选）', type: 'scopes', options: GW.TOKEN_SCOPES.map(function (s) {
-        return { value: s.value, label: s.label, desc: s.desc, checked: s.dft };
-      }) },
-    ],
-    submitText: '创建',
-    onSubmit: async function (v) {
-      if (!v.name) throw new Error('名称不能为空');
-      var body = { name: v.name };
-      if (v.scopes.length) body.scopes = v.scopes;
-      var r = await api('/platform-tokens', { method: 'POST', body: JSON.stringify(body) });
-      GW.R.tokens();
-      // 完整令牌仅此一次显示（后端只存哈希，之后无法再取回明文）
-      GW.secretModal({
-        title: '令牌已创建（仅此一次显示）',
-        note: r.message || '',
-        secret: r.token || '',
-        warn: '请立即复制保存；关闭后将无法再次查看明文。',
-      });
-      return false; // 接管弹窗（展示一次性明文），阻止 formModal 自动关闭
-    },
-  });
-};
-
-GW.actions['token-delete'] = function (ds) {
-  GW.confirmModal({
-    title: '确认删除',
-    body: '确定要删除令牌「' + (ds.name || ds.id) + '」吗？此操作不可撤销。',
-    danger: true,
-    onConfirm: async function () {
-      try {
-        await api('/platform-tokens/' + encodeURIComponent(ds.id), { method: 'DELETE' });
-        GW.toast('删除成功', 'success');
-        GW.R.tokens();
       } catch (e) { GW.toast(e.message, 'error'); }
     },
   });

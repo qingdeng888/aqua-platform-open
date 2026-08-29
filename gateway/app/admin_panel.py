@@ -18,11 +18,11 @@ from app.db_async import async_engine
 from app.models import (
     AdminSetting,
     UpstreamKey,
+    Proxy,
     Client,
     ClientApiKey,
     RequestLog,
     AuditLog,
-    PlatformToken,
     KeyUsageStat,
     CommercialDetection,
     BucketSnapshot,
@@ -104,6 +104,23 @@ class UpstreamKeyView(ModelView, model=UpstreamKey):
     can_delete = True
 
 
+class ProxyView(ModelView, model=Proxy):
+    name = "代理池"
+    name_plural = "代理池"
+    icon = "fa-solid fa-network-wired"
+    column_list = [
+        Proxy.id, Proxy.name, Proxy.scheme, Proxy.host, Proxy.port,
+        Proxy.username, Proxy.status, Proxy.last_check_at, Proxy.last_check_ok,
+        Proxy.created_at, Proxy.updated_at,
+    ]
+    column_searchable_list = [Proxy.name, Proxy.host]
+    column_sortable_list = [Proxy.name, Proxy.scheme, Proxy.status]
+    # 代理密码密文不进表单与详情页，防凭据泄漏
+    form_excluded_columns = [Proxy.password_ciphertext]
+    column_details_exclude_list = [Proxy.password_ciphertext]
+    can_delete = True
+
+
 class ClientView(ModelView, model=Client):
     name = "客户端"
     name_plural = "客户端"
@@ -159,21 +176,6 @@ class AuditLogView(ModelView, model=AuditLog):
     column_default_sort = ("created_at", True)
     can_create = False
     can_edit = False
-    can_delete = True
-
-
-class PlatformTokenView(ModelView, model=PlatformToken):
-    name = "平台令牌"
-    name_plural = "平台令牌"
-    icon = "fa-solid fa-shield"
-    column_list = [
-        PlatformToken.id, PlatformToken.name, PlatformToken.scopes,
-        PlatformToken.status, PlatformToken.created_at, PlatformToken.expires_at,
-    ]
-    column_searchable_list = [PlatformToken.name]
-    form_excluded_columns = [PlatformToken.token_hash]
-    # v10.1修复：详情页排除令牌哈希，防密钥材料泄漏
-    column_details_exclude_list = [PlatformToken.token_hash]
     can_delete = True
 
 
@@ -239,11 +241,11 @@ def create_admin(app=None) -> Admin:
 
     admin.add_view(AdminSettingView)
     admin.add_view(UpstreamKeyView)
+    admin.add_view(ProxyView)
     admin.add_view(ClientView)
     admin.add_view(ClientApiKeyView)
     admin.add_view(RequestLogView)
     admin.add_view(AuditLogView)
-    admin.add_view(PlatformTokenView)
     admin.add_view(KeyUsageStatView)
     admin.add_view(CommercialDetectionView)
     admin.add_view(BucketSnapshotView)

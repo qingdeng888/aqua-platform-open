@@ -4,8 +4,8 @@
 沿用v6的Fernet+HKDF-SHA256加密体系：
 - 上游密钥加密：salt=acu-upstream-key-derivation
 - 客户端密钥加密：salt=acu-client-key-derivation
+- 代理凭据加密：salt=acu-proxy-credential-derivation
 - 管理员Token：HMAC-SHA256，24小时有效
-- 平台令牌：apt_前缀，32随机字符
 """
 import base64
 import hashlib
@@ -56,8 +56,8 @@ def decrypt_upstream_key(ciphertext: str, master_key_b64: str) -> str:
 
 # ========== 客户端密钥加密 ==========
 
-def generate_platform_key() -> str:
-    """生成平台API Key，格式: sk- + 32随机字符（v10.0: 兼容OpenAI标准格式，旧acu_密钥仍可用）"""
+def generate_client_key() -> str:
+    """生成下游客户端API Key，格式: sk- + 32随机字符（兼容OpenAI标准格式，旧acu_密钥仍可用）"""
     alphabet = string.ascii_letters + string.digits
     random_part = "".join(secrets.choice(alphabet) for _ in range(32))
     return f"sk-{random_part}"
@@ -84,6 +84,32 @@ def encrypt_secret(plaintext: str, master_key_b64: str) -> str:
 def decrypt_secret(ciphertext: str, master_key_b64: str) -> str:
     """解密客户端密钥"""
     f = Fernet(_derive_client_fernet_key(master_key_b64))
+    return f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+
+
+# ========== 代理凭据加密 ==========
+
+def _derive_proxy_fernet_key(master_key_b64: str) -> bytes:
+    """从主密钥派生代理凭据Fernet密钥（独立salt，与上游/客户端两条路径互不通解）"""
+    raw = base64.b64decode(master_key_b64)
+    hkdf = HKDF(
+        algorithm=SHA256(),
+        length=32,
+        salt=b"acu-proxy-credential-derivation",
+        info=b"acu-proxy-fernet-key",
+    )
+    return base64.urlsafe_b64encode(hkdf.derive(raw))
+
+
+def encrypt_proxy_secret(plaintext: str, master_key_b64: str) -> str:
+    """加密代理密码"""
+    f = Fernet(_derive_proxy_fernet_key(master_key_b64))
+    return f.encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_proxy_secret(ciphertext: str, master_key_b64: str) -> str:
+    """解密代理密码"""
+    f = Fernet(_derive_proxy_fernet_key(master_key_b64))
     return f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
 
 
@@ -142,18 +168,3 @@ def verify_admin_token(token: str, secret: str) -> Optional[dict]:
         return payload
     except Exception:
         return None
-
-
-# ========== 平台令牌 ==========
-
-def generate_platform_token() -> str:
-    """生成平台服务令牌，格式: apt_ + 32随机字符"""
-    alphabet = string.ascii_letters + string.digits
-    random_part = "".join(secrets.choice(alphabet) for _ in range(32))
-    return f"apt_{random_part}"
-
-
-def verify_platform_token(token: str, token_hash: str) -> bool:
-    """验证平台令牌hash"""
-    computed = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    return hmac.compare_digest(computed, token_hash)
