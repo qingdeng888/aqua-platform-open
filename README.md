@@ -527,8 +527,8 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f gateway
 要点：
 
 - **镜像地址**：`ghcr.io/<owner>/<repo>`，由 `github.repository` 自动推导，**fork 后无需改任何配置**。
-- **标签**：分支名 / 语义版本（打 tag 时同时发 `{{version}}` 与 `{{major}}.{{minor}}`）/ `sha-<短哈希>` / `latest`（仅默认分支）。
-- **架构**：日常推送只构 `linux/amd64`；只有打 `v*` 标签发版时才交叉构建 `linux/arm64`（QEMU 模拟慢）。
+- **标签**：分支名 / 语义版本（打 tag 时同时发 `{{version}}` 与 `{{major}}.{{minor}}`）/ `sha-<短哈希>` / `latest`。注意 `latest` 的 `enable={{is_default_branch}}` 在 **tag 推送时同样为真**（metadata-action 视 tag 为发版），因此打 `v*` 标签会一并更新 `latest`——这正是 `docker compose pull` 默认能拿到双架构镜像的原因。
+- **架构**：日常推送只构 `linux/amd64`；只有打 `v*` 标签发版时才交叉构建 `linux/amd64,linux/arm64`（QEMU 模拟慢，实测双架构约 3.5 分钟 vs 单架构约 1 分钟）。**需要 arm64 镜像（如树莓派、Apple Silicon、Graviton）就打标签发版**，不要指望分支推送。
 - **缓存**：`type=gha` 跨 workflow 复用层缓存，依赖未变时 builder 阶段直接命中。
 - **PR 只验证构建**，不登录、不推送（fork 的 PR 拿不到写权限）。
 - 纯文档改动（`**.md` / `docs/**` / `LICENSE`）不触发流水线。
@@ -536,7 +536,15 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f gateway
 
 > ⚠️ **两个首次使用的坑**：
 > 1. `docker compose pull` 只有在 CI **至少成功发布过一次镜像**之后才能拉到，全新 fork 请先推一次代码等流水线跑完，或直接用上面的 local 覆盖层本机构建。
-> 2. GHCR 包首次发布默认是 **private**，`docker pull` 会要求登录。公开拉取需到 GitHub → Packages → 该包 → Package settings → Change visibility → Public（**只需做一次**）。
+> 2. GHCR 包的可见性可能是 **private**（此时 `docker pull` 报 401 要求登录）。本仓库首发即继承源仓库的 public 可见性，实测匿名 `docker pull` 可直接拉取；若你的 fork 拉取被拒，到 GitHub → Packages → 该包 → Package settings → Change visibility → Public 改一次即可（**只需做一次**）。
+
+已发布镜像（v12.1.0，实测）：
+
+| 标签 | 架构 | 来源 |
+|------|------|------|
+| `latest` / `12.1.0` / `12.1` | `linux/amd64` + `linux/arm64` | 推送 `v12.1.0` 标签 |
+| `sha-<短哈希>` | 同上（打 tag 时）/ 仅 `amd64`（日常推送时） | 每次构建 |
+| `<分支名>` | 仅 `linux/amd64` | 日常分支推送 |
 
 反代与 HTTPS 仍按下面的 Nginx 配置做（`proxy_pass` 指向 `GW_BIND:GW_PORT`），并记得设 `AQUA_TRUST_PROXY_HEADERS=1`。
 
