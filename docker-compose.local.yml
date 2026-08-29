@@ -1,0 +1,22 @@
+# ============================================================================
+# 本地源码构建覆盖层（叠加在 docker-compose.yml 之上，不重复定义 db 与网络）
+# ----------------------------------------------------------------------------
+# 用法（两个 -f 缺一不可，顺序不能颠倒）：
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f gateway
+#
+# 与主文件的唯一差别：gateway 用本机 Dockerfile 现场编译，不拉 GHCR 镜像。
+# 适用场景：改完源码要立刻验证、CI 还没跑完、或所在网络拉不到 ghcr.io。
+#
+# 服务名/项目名/卷都沿用主文件（name: aqua-gateway），因此本地构建版与预构建版
+# 共用同一个 pgdata 卷和同一套容器——两种方式来回切换不会丢库、不会起两份。
+# ============================================================================
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aqua-gateway:local
+    # 强制用本地构建结果，不去 registry 找 aqua-gateway:local（那里不存在）
+    pull_policy: build

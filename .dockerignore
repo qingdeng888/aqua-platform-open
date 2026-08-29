@@ -41,6 +41,8 @@ docs
 Dockerfile
 .dockerignore
 docker-compose.yml
+docker-compose.local.yml
+.github
 
 # 编辑器与系统垃圾
 .idea

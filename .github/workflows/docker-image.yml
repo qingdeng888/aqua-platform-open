@@ -1,0 +1,137 @@
+# ============================================================================
+# 构建并推送 Docker 镜像到 GHCR（GitHub Container Registry）
+# ----------------------------------------------------------------------------
+# 触发：推送任意分支 / 推送 v* 标签 / 向 main 提 PR / 手动运行
+# 顺序：先跑两套测试，全绿才构建镜像——测试红灯不发镜像
+# 凭据：GHCR 用内置 GITHUB_TOKEN 登录，无需配置任何 Secret
+#
+# 镜像地址：ghcr.io/<owner>/<repo>（由 github.repository 自动推导，fork 后无需改）
+# 镜像标签：分支名 / 语义版本(打 tag 时) / sha-<短哈希> / latest(仅默认分支)
+#
+# ⚠️ 首次构建后 GHCR 包默认是 private，`docker pull` 会要求登录。
+#    公开拉取需到 GitHub → Packages → 该包 → Package settings → Change
+#    visibility → Public（只需做一次）。
+# ============================================================================
+
+name: docker-image
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*.*.*']
+    # 纯文档改动不必重跑流水线（.dockerignore 已把 md/docs 排除在镜像外）
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  workflow_dispatch:
+
+# 同一分支的新推送取消上一次仍在跑的流水线，省 CI 额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: 测试（后端单测 + 前端静态检查）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 与 Dockerfile 的 python:3.13-slim 对齐，避免"CI 过了镜像跑不起来"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: gateway/requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r gateway/requirements.txt pytest pytest-asyncio
+
+      # 两套测试都不连库不连网，无需注入 PG_PASSWORD 等任何环境变量
+      - name: 后端单元测试
+        run: python -m pytest tests/ -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 前端静态检查
+        run: node tests/static-smoke.mjs
+
+  build:
+    name: 构建并推送镜像
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # 只有打 v* 标签发版时才交叉构建 arm64（QEMU 模拟慢），日常推送只构 amd64
+      - name: 计算目标架构
+        id: plat
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "platforms=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 准备 QEMU（交叉构建 arm64 用）
+        if: github.ref_type == 'tag'
+        uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      # PR 只验证能否构建成功，不登录、不推送（fork 的 PR 也拿不到写权限）
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像标签与 OCI 标注
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ steps.plat.outputs.platforms }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 跨 workflow 复用层缓存：依赖未变时 builder 阶段直接命中
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 不生成 provenance 证明，避免 GHCR 包页面出现 unknown/unknown 条目
+          provenance: false
+
+      - name: 输出镜像地址
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "### 镜像已推送" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.meta.outputs.tags }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

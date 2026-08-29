@@ -1,10 +1,14 @@
 # ============================================================================
 # AQUA Gateway 容器编排：gateway（网关）+ db（PostgreSQL 17）
 # ----------------------------------------------------------------------------
-# 用法：
+# 默认使用 CI 预构建镜像（GitHub Actions 每次推送自动发布到 GHCR），不在本机编译：
 #   cp .env.example .env   # 填 ACU_ADMIN_PASSWORD_HASH 与 PG_PASSWORD
-#   docker compose up -d --build
+#   docker compose pull
+#   docker compose up -d
 #   docker compose logs -f gateway
+#
+# 改了源码要立刻验证时，叠加 local 覆盖文件改为本机构建：
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 #
 # 变量取值来自同目录 .env（compose 自动加载）。
 # 已有外部数据库时：删掉下面的 db 服务与 depends_on，把 gateway 的
@@ -42,10 +46,9 @@ services:
     #   - "127.0.0.1:${PG_EXPOSE_PORT:-5432}:5432"
 
   gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: aqua-gateway:12.1.0
+    # CI 预构建镜像。换自己的仓库/私有 registry 时不必改这里，
+    # 在 .env 里覆盖 GW_IMAGE / GW_IMAGE_TAG 即可（例：GW_IMAGE_TAG=v12.1.0 锁版本）。
+    image: ${GW_IMAGE:-ghcr.io/qingdeng888/aqua-platform-open}:${GW_IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file:
       - .env

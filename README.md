@@ -46,7 +46,8 @@ v12.1 为纯中转网关补上**出网通道治理**：上游密钥不再只能�
 | **控制台** | 新增独立「代理池」标签页（页面 10 → 11）；上游密钥列表新增「出网」列与出网方式选择 |
 | **探活一致性** | 三条密钥探活路径与 `/upstreams/health-check` 全部改走该密钥自己的出网通道，代理专用密钥不再被误判停用 |
 | **模型测试** | 新增「模型测试」页（11 → 12 页）与 `/gw/admin/model-test/*`：实时模型列表 + 搜索/全选 + 并发批量探测，可选「直连 NVIDIA 上游」或「走本网关中转」两条通道 |
-| **容器化** | 新增 `Dockerfile`（多阶段、非 root、内建健康检查）+ `docker-compose.yml`（网关 + PostgreSQL 17）+ `.dockerignore`，一条 `docker compose up -d --build` 起全栈 |
+| **容器化** | 新增 `Dockerfile`（多阶段、非 root、内建健康检查）+ `docker-compose.yml`（网关 + PostgreSQL 17，默认拉 CI 预构建镜像）+ `docker-compose.local.yml`（本机源码构建覆盖层）+ `.dockerignore`，`docker compose pull && docker compose up -d` 起全栈 |
+| **CI/CD** | 新增 `.github/workflows/docker-image.yml`：推送即跑「后端单测 + 前端静态检查」，全绿才构建镜像并推送到 GHCR，无需配置任何 Secret |
 | **工程化** | 测试基线 105 个后端单测 + 28 项前端静态检查；新增依赖 `httpx[socks]` |
 
 ---
@@ -176,8 +177,15 @@ cd gateway && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 ```bash
 cp .env.example .env       # 至少填 ACU_ADMIN_PASSWORD_HASH 与 PG_PASSWORD
-docker compose up -d --build
+docker compose pull        # 拉 CI 预构建镜像（GHCR），不在本机编译
+docker compose up -d
 docker compose logs -f gateway
+```
+
+改了源码要立刻验证时，叠加 `docker-compose.local.yml` 改为本机构建：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 ```
 
 默认映射到 `http://127.0.0.1:8000`（宿主地址与端口由 `.env` 的 `GW_BIND`/`GW_PORT` 控制），建库、建表与迁移在容器首次启动时自动完成。运维细节见[Docker Compose 部署](#docker-compose-部署)。
@@ -188,7 +196,7 @@ docker compose logs -f gateway
 
 ## 环境变量
 
-完整模板见 [`.env.example`](.env.example)（含随机值生成命令）。**应用读取 14 项**，另有 **4 项仅供 `docker-compose.yml` 使用**（应用本身不读）。
+完整模板见 [`.env.example`](.env.example)（含随机值生成命令）。**应用读取 14 项**，另有 **6 项仅供 `docker-compose.yml` 使用**（应用本身不读）。
 
 加载与优先级：
 
@@ -258,6 +266,8 @@ python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 | `GW_PORT` | `8000` | 宿主端口（容器内恒为 8000）。改动需同步 `CORS_ALLOWED_ORIGINS` 与反代 `proxy_pass` |
 | `TZ` | `Asia/Shanghai` | 只影响 `gateway` 容器日志的时间显示。`db` 容器固定 `TZ/PGTZ=UTC`；写库时间戳恒为 UTC `Z`，控制台按浏览器本地时区渲染 |
 | `PG_EXPOSE_PORT` | `5432` | 仅在取消 `docker-compose.yml` 中 `db.ports` 注释后生效（把库暴露到宿主 `127.0.0.1` 以便外部工具连入）；默认全程不暴露 |
+| `GW_IMAGE` | `ghcr.io/qingdeng888/aqua-platform-open` | 网关镜像仓库地址。换成自己 fork 的 GHCR 包或私有 registry 时改这里，不必动 `docker-compose.yml` |
+| `GW_IMAGE_TAG` | `latest` | 镜像标签。生产建议锁版本（如 `v12.1.0` 或 `sha-a1b2c3d`）而非跟随 `latest`；本机源码构建时该值被 `docker-compose.local.yml` 忽略 |
 
 ---
 
@@ -454,10 +464,11 @@ print(resp.choices[0].message.content)
 
 ### Docker Compose 部署
 
-仓库根目录提供 [`Dockerfile`](Dockerfile) 与 [`docker-compose.yml`](docker-compose.yml)，两个服务：`gateway`（网关）+ `db`（PostgreSQL 17）。
+仓库根目录提供 [`Dockerfile`](Dockerfile) 与 [`docker-compose.yml`](docker-compose.yml)，两个服务：`gateway`（网关）+ `db`（PostgreSQL 17）。**默认使用 CI 预构建镜像**（GitHub Actions 每次推送自动发布到 GHCR），本机不编译：
 
 ```bash
-docker compose up -d --build        # 构建并启动
+docker compose pull                 # 拉取预构建镜像（GHCR）
+docker compose up -d                # 启动
 docker compose ps                   # 两个服务都应为 healthy
 docker compose logs -f gateway      # 跟踪日志
 docker compose restart gateway      # 改完 .env 后重启生效
@@ -465,19 +476,33 @@ docker compose down                 # 停止（数据卷保留）
 docker compose down -v              # 停止并删除数据卷（⚠️ 数据全部丢失）
 ```
 
-代码更新后的升级（数据卷与库内数据保留，建表/迁移在新容器启动时自动补齐）：
+版本升级（数据卷与库内数据保留，建表/迁移在新容器启动时自动补齐）：
 
 ```bash
-git pull
-docker compose up -d --build        # 重建镜像并滚动替换 gateway 容器
+docker compose pull                     # 拉新镜像
+docker compose up -d                    # 滚动替换 gateway 容器
 docker compose logs --tail=50 gateway   # 确认 lifespan 迁移与预热无异常
 ```
+
+镜像地址与标签由 `.env` 的 `GW_IMAGE` / `GW_IMAGE_TAG` 控制（默认 `ghcr.io/qingdeng888/aqua-platform-open:latest`），换 fork 仓库或私有 registry 无需改编排文件。**生产建议锁版本**（`GW_IMAGE_TAG=v12.1.0`）而非跟随 `latest`，避免推送触发的镜像更新在下次 `pull` 时被动生效。
+
+#### 本机源码构建（local 版）
+
+改了源码要立刻验证、CI 还没跑完、或所在网络拉不到 `ghcr.io` 时，叠加 [`docker-compose.local.yml`](docker-compose.local.yml) 覆盖层现场编译（**两个 `-f` 缺一不可，顺序不能颠倒**）：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.local.yml logs -f gateway
+```
+
+覆盖层只重定义 `gateway` 的 `build` / `image: aqua-gateway:local` / `pull_policy: build`，`db`、网络与数据卷全部继承主文件。项目名同为 `aqua-gateway`，因此两种方式**共用同一个 `pgdata` 卷和同一套容器**——来回切换不会丢库、不会起两份。
 
 镜像与编排要点：
 
 | 项 | 说明 |
 |------|------|
 | 镜像 | `python:3.13-slim` 多阶段构建：builder 装依赖到 `/opt/venv`，runtime 只带 venv + `gateway/`，无编译器与 pip 缓存 |
+| 镜像来源 | 默认 GHCR 预构建（`docker compose pull`）；本机构建走 `docker-compose.local.yml` 覆盖层 |
 | 运行用户 | 非 root（`aqua`，uid 10001）；容器内无运行期写盘需求 |
 | 单 worker | `CMD` 不带 `--workers`，`deploy.replicas: 1`——调度器算法与代理池轮询游标是进程内状态，**不可 `--scale`** |
 | 端口 | 容器内固定 8000；宿主侧由 `GW_BIND`/`GW_PORT` 决定，默认 `127.0.0.1:8000`（仅本机） |
@@ -489,6 +514,29 @@ docker compose logs --tail=50 gateway   # 确认 lifespan 迁移与预热无异�
 | 外部数据库 | 删掉 `db` 服务与 `depends_on`，把 `gateway` 的 `PG_HOST` 改成实际地址即可 |
 | 时区 | `TZ` 只影响容器日志的时间显示；`db` 容器固定 `TZ/PGTZ=UTC`，写库时间戳恒为 UTC `Z` 格式，控制台按浏览器本地时区渲染——宿主与容器时区不一致也不会算错统计窗口 |
 | 构建上下文 | [`.dockerignore`](.dockerignore) 排除 `.env`/密钥/`.git`/`.venv`/测试与文档——敏感文件不进镜像层 |
+
+#### CI 自动构建镜像
+
+[`.github/workflows/docker-image.yml`](.github/workflows/docker-image.yml) 在推送任意分支 / 打 `v*.*.*` 标签 / 向 `main` 提 PR / 手动触发时运行，分两个 job：
+
+| Job | 内容 |
+|------|------|
+| `test` | Python 3.13 装 `gateway/requirements.txt` 跑 `pytest tests/`，Node 20 跑 `node tests/static-smoke.mjs`。两套测试都不连库不连网，**无需注入任何环境变量或 Secret** |
+| `build` | `needs: test`——测试红灯不发镜像。用内置 `GITHUB_TOKEN` 登录 GHCR（无需配置 Secret），`docker/build-push-action` 构建并推送 |
+
+要点：
+
+- **镜像地址**：`ghcr.io/<owner>/<repo>`，由 `github.repository` 自动推导，**fork 后无需改任何配置**。
+- **标签**：分支名 / 语义版本（打 tag 时同时发 `{{version}}` 与 `{{major}}.{{minor}}`）/ `sha-<短哈希>` / `latest`（仅默认分支）。
+- **架构**：日常推送只构 `linux/amd64`；只有打 `v*` 标签发版时才交叉构建 `linux/arm64`（QEMU 模拟慢）。
+- **缓存**：`type=gha` 跨 workflow 复用层缓存，依赖未变时 builder 阶段直接命中。
+- **PR 只验证构建**，不登录、不推送（fork 的 PR 拿不到写权限）。
+- 纯文档改动（`**.md` / `docs/**` / `LICENSE`）不触发流水线。
+- 未生成 provenance 证明（`provenance: false`），避免 GHCR 包页面出现 `unknown/unknown` 条目。
+
+> ⚠️ **两个首次使用的坑**：
+> 1. `docker compose pull` 只有在 CI **至少成功发布过一次镜像**之后才能拉到，全新 fork 请先推一次代码等流水线跑完，或直接用上面的 local 覆盖层本机构建。
+> 2. GHCR 包首次发布默认是 **private**，`docker pull` 会要求登录。公开拉取需到 GitHub → Packages → 该包 → Package settings → Change visibility → Public（**只需做一次**）。
 
 反代与 HTTPS 仍按下面的 Nginx 配置做（`proxy_pass` 指向 `GW_BIND:GW_PORT`），并记得设 `AQUA_TRUST_PROXY_HEADERS=1`。
 
@@ -569,7 +617,7 @@ WantedBy=multi-user.target
 | 进程守护 | 裸机：systemd `Restart=always`（v12.0 已移除 platform 时代的 `scripts/auto_recovery.sh`）；Docker：`restart: unless-stopped` + 健康检查 |
 | 查看日志 | 裸机看 systemd journal；Docker `docker compose logs -f --tail=200 gateway`（json-file 已限 10m×3） |
 | 进库操作 | Docker `docker compose exec db psql -U aqua -d aqua_gateway`；备份恢复见[Docker Compose 部署](#docker-compose-部署) |
-| 版本升级 | 裸机：拉代码 + 重启服务；Docker：`git pull && docker compose up -d --build`。两者的建表与迁移都在启动 lifespan 内幂等执行 |
+| 版本升级 | 裸机：拉代码 + 重启服务；Docker：`docker compose pull && docker compose up -d`（本机构建版加两个 `-f` 并带 `--build`）。两者的建表与迁移都在启动 lifespan 内幂等执行 |
 | 改配置生效 | `.env` 改动需重启进程/容器（`docker compose restart gateway`）；控制台「系统配置」项为热生效，无需重启 |
 
 ---
@@ -617,9 +665,11 @@ aqua-platform-open/
 │   └── requirements.txt
 ├── tests/                    # pytest ×105 + 前端静态检查 ×28
 ├── docs/rules/               # 并发与限流规则文档
+├── .github/workflows/        # CI：docker-image.yml（测试通过才构建并推送 GHCR 镜像）
 ├── conftest.py               # 统一 sys.path
 ├── Dockerfile                # 容器镜像（python:3.13-slim 多阶段，非 root，单 worker）
-├── docker-compose.yml        # 编排：gateway + PostgreSQL 17（含健康检查与数据卷）
+├── docker-compose.yml        # 编排：gateway(预构建镜像) + PostgreSQL 17（含健康检查与数据卷）
+├── docker-compose.local.yml  # 覆盖层：gateway 改为本机源码构建（叠加在上面之上）
 ├── .dockerignore             # 构建上下文裁剪（排除 .env/密钥/.git/.venv）
 ├── .env.example              # 环境变量模板（含生成命令）
 ├── ARCHITECTURE.md           # 架构权威文档（17 算法表）
@@ -647,6 +697,8 @@ aqua-platform-open/
 - **修复（联调发现）**：统一版本号——`/healthz` 与 OpenAPI 元数据由 `11.0.0`、控制台标题与登录页由 `v10.0` 修正为 `12.1.0`
 - **修复（联调发现）**：请求日志时间戳混格式——`request_logs` 的 `created_at`/`started_at`/`completed_at` 由写入端按 `+08:00` 落库，而所有窗口边界（`utcnow`/`utcnow_minus`/`days_ago_utc`）都是 UTC `Z` 格式；这三列是 **TEXT**，过滤走字符串字典序比较，于是每个时间窗口都被向外撑开 8 小时（IP 监控 5 分钟窗变 8h05m、成功日志 3 天保留变 3d08h、"今日"统计多算约 16h）。现写入端统一走 `utcnow()`/新增的 `utc_from_ts()`，删除 `localnow()`/`localnow_ms()`/`today_start_local()` 三个本地时区助手，`_migrate_request_logs_full` 追加幂等归一化把历史 `+08:00` 行改写为 `Z`；控制台 `fmtTime()` 改为解析后按浏览器本地时区渲染（不再字符串截断），请求日志详情的三个时间字段也改经 `fmtTime` 输出
 - **容器化**：新增 `Dockerfile`（`python:3.13-slim` 多阶段构建、非 root uid 10001、`/healthz` 内建 HEALTHCHECK、CMD 不带 `--workers`）、`docker-compose.yml`（`gateway` + `postgres:17-alpine`，`depends_on: service_healthy`、命名卷 `pgdata`、日志轮转、`host.docker.internal` 映射）与 `.dockerignore`（`.env`/密钥/`.git`/`.venv` 不进镜像层）；`.env.example` 新增 Docker 小节（`GW_BIND`/`GW_PORT`/`TZ`）
+- **CI 自动构建镜像**：新增 `.github/workflows/docker-image.yml`——推送任意分支 / 打 `v*.*.*` 标签 / 向 `main` 提 PR / 手动触发时，先跑「后端单测 + 前端静态检查」两个 job，全绿才构建镜像并推送到 GHCR（`ghcr.io/<owner>/<repo>`，由 `github.repository` 推导，fork 无需改配置）。用内置 `GITHUB_TOKEN` 登录，**零 Secret 配置**；标签含分支名 / 语义版本 / `sha-<短哈希>` / `latest`（仅默认分支）；`type=gha` 层缓存；日常推送只构 `linux/amd64`，打 tag 才交叉构建 `arm64`；PR 只验证构建不推送；`provenance: false` 避免包页面出现 `unknown/unknown`
+- **预构建镜像 + local 覆盖层**：`docker-compose.yml` 的 `gateway` 改为消费预构建镜像 `${GW_IMAGE:-ghcr.io/qingdeng888/aqua-platform-open}:${GW_IMAGE_TAG:-latest}`（移除 `build` 段），部署与升级变为 `docker compose pull && docker compose up -d`；新增 `docker-compose.local.yml` 覆盖层（`build` + `image: aqua-gateway:local` + `pull_policy: build`）供本机源码构建，只重定义 `gateway`，`db`/网络/数据卷全部继承，两种方式共用同一 `pgdata` 卷可无损来回切换；`.env.example` 新增 `GW_IMAGE`/`GW_IMAGE_TAG` 两项
 - **文档（Docker 踩坑）**：bcrypt 哈希含 `$`，docker compose 会对 `env_file` 中的 `$xxx` 做变量插值，`ACU_ADMIN_PASSWORD_HASH` 不加单引号会被静默截断（`$2b$12$bdJq…` → `$2b$12.yz…`），表现为配置无误却怎么都登不上；`.env.example`、README 快速开始与上线清单均已标注单引号写法
 - **测试**：后端 105 passed（代理 URL/客户端/选路 21 个 + 代理凭据加密与三路派生隔离用例；新增 `utc_from_ts` 格式/取值 3 个 + 写库路径不得回退到本地时区写入的守卫 2 个；新增模型测试 45 个：提示词归一 / `max_tokens` 收敛 / 回复与错误提取三态 / 路由与常量契约 / `extra="forbid"` / 不外泄凭据的源码守卫）；前端静态检查 28 项（代理池动作与出网徽标守卫；新增 `fmtTime` 本地化渲染与详情页无裸时间戳守卫；新增模型测试页动作齐全、自测密钥不落盘、可中止、`innerHTML` 只写静态模板、`max_tokens` 默认值前后端一致守卫）
 
