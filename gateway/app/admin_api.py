@@ -19,6 +19,7 @@
 import asyncio
 import os
 import hmac
+import re
 import time
 import uuid
 import logging
@@ -31,7 +32,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.database import (
     init_db, fetch_one, fetch_all, execute, get_setting, set_setting,
-    insert_audit, utcnow, today_start_utc, days_ago_utc,
+    insert_audit, insert_audit_many, utcnow, today_start_utc, days_ago_utc,
     cleanup_success_logs,
 )
 from app.security import (
@@ -80,6 +81,15 @@ def _verify_admin_password(password: str) -> bool:
     return hmac.compare_digest(password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
 
 
+# ========== 上游密钥批量添加常量 ==========
+
+BULK_MAX_LINES = 200        # 单次批量上限：再多请分批，避免一次请求里做上千次 HKDF+Fernet
+BULK_KEY_MIN_LEN = 8        # 低于此长度的行一律当粘贴残渣拒掉
+BULK_KEY_MAX_LEN = 512
+BULK_NAME_PREFIX = "nv"     # 自动命名前缀默认值
+BULK_NAME_PREFIX_MAX = 32
+
+
 # ========== 请求模型 ==========
 
 class LoginRequest(BaseModel):
@@ -89,6 +99,17 @@ class LoginRequest(BaseModel):
 class UpstreamCreateRequest(BaseModel):
     name: str
     api_key: str
+    provider: str = "nvidia"
+    weight: int = 1
+    rpm_limit: int = 40
+    switch_threshold: int = 38
+    proxy_mode: str = "direct"      # direct | bind | rotate
+    proxy_id: Optional[str] = None  # proxy_mode='bind' 时必填
+
+class UpstreamBulkCreateRequest(BaseModel):
+    """批量添加：api_keys 为多行文本，每行一个密钥，名称由后端自动生成"""
+    api_keys: str
+    name_prefix: str = BULK_NAME_PREFIX  # 自动命名格式 {前缀}-{序号}
     provider: str = "nvidia"
     weight: int = 1
     rpm_limit: int = 40
@@ -597,6 +618,59 @@ async def test_proxy(proxy_id: str, request: Request):
 
 # ========== 上游密钥管理 ==========
 
+def parse_bulk_keys(raw: str) -> list:
+    """多行文本 → 逐行解析结果，保持输入顺序
+
+    每项形如 {"line": 行号, "api_key": 明文} 或 {"line": 行号, "reason": 跳过原因}。
+    空行与 `#` 注释行直接忽略（不进结果），方便管理员在粘贴的密钥清单里写备注。
+    明文只在进程内存中流转：不写日志、不进响应体（响应只回 mask_secret 后的前缀）。
+    """
+    seen = {}
+    out = []
+    for lineno, line in enumerate((raw or "").splitlines(), start=1):
+        key = line.strip()
+        if not key or key.startswith("#"):
+            continue
+        if len(key.split()) > 1:
+            # 中间带空格通常是复制时把两个密钥连在了一行，或掺进了说明文字
+            out.append({"line": lineno, "reason": "含空格，疑似串行或掺入说明文字"})
+        elif len(key) < BULK_KEY_MIN_LEN:
+            out.append({"line": lineno, "reason": f"长度不足 {BULK_KEY_MIN_LEN} 字符"})
+        elif len(key) > BULK_KEY_MAX_LEN:
+            out.append({"line": lineno, "reason": f"长度超过 {BULK_KEY_MAX_LEN} 字符"})
+        elif key in seen:
+            out.append({"line": lineno, "reason": f"与本批第 {seen[key]} 行重复"})
+        else:
+            seen[key] = lineno
+            out.append({"line": lineno, "api_key": key})
+    return out
+
+
+def gen_bulk_names(prefix: str, existing: list, count: int) -> list:
+    """生成 count 个 {前缀}-{序号} 形式的密钥名，序号从库内同前缀最大值续排
+
+    表结构没给 name 建唯一索引，重名不会报错但会让运维看列表时分不清，因此这里
+    既续排也跳过已被占用的名字（例如有人手工建过 nv-07）。
+    """
+    prefix = (prefix or "").strip()[:BULK_NAME_PREFIX_MAX] or BULK_NAME_PREFIX
+    taken = set(existing or [])
+    pattern = re.compile(r"^" + re.escape(prefix) + r"-(\d+)$")
+    seq = 0
+    for name in taken:
+        m = pattern.match(name or "")
+        if m:
+            seq = max(seq, int(m.group(1)))
+    names = []
+    while len(names) < count:
+        seq += 1
+        candidate = f"{prefix}-{seq:02d}"
+        if candidate in taken:
+            continue
+        taken.add(candidate)
+        names.append(candidate)
+    return names
+
+
 @router.get("/upstreams", tags=["管理员"])
 async def list_upstreams(request: Request):
     """上游密钥列表（含调度器实时状态）"""
@@ -686,6 +760,103 @@ async def create_upstream(req: UpstreamCreateRequest, request: Request):
         f"创建上游密钥: {req.name} 出网={proxy_mode}",
     )
     return {"id": key_id, "message": "创建成功"}
+
+
+@router.post("/upstreams/bulk", tags=["管理员"])
+async def bulk_create_upstreams(req: UpstreamBulkCreateRequest, request: Request):
+    """批量添加上游密钥：每行一个密钥，名称自动生成（单个添加走 POST /upstreams，两条路径并存）
+
+    逐行报告成功/跳过原因；跳过的行不阻断其余行入库。全部有效行走一条多值 INSERT，
+    要么全进要么全不进，不会留下"导入一半"的中间态。
+    """
+    await require_admin(request)
+
+    proxy_mode, proxy_id = await _validate_proxy_binding(req.proxy_mode, req.proxy_id)
+
+    items = parse_bulk_keys(req.api_keys)
+    if not items:
+        raise HTTPException(status_code=400, detail="请至少粘贴一行密钥（空行与 # 注释行会被忽略）")
+    todo = [it for it in items if "api_key" in it]
+    if len(todo) > BULK_MAX_LINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次最多 {BULK_MAX_LINES} 行，本次有效 {len(todo)} 行，请分批提交",
+        )
+
+    master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
+    if not master_key:
+        raise HTTPException(status_code=500, detail="主密钥未配置")
+
+    rows = await asyncio.to_thread(fetch_all, "SELECT name, api_key_ciphertext FROM upstream_keys")
+
+    def _existing_plaintexts() -> set:
+        """解出库内已有明文用于查重。单行密文损坏只丢掉该行的查重能力，不阻断本次导入。
+
+        Fernet 密文带随机 IV，同一明文两次加密结果不同，无法靠比对密文查重，只能解密。
+        放进线程是因为每次解密都要跑一遍 HKDF，密钥多时累计毫秒级，不该占着事件循环。
+        """
+        out = set()
+        for r in rows:
+            try:
+                out.add(decrypt_upstream_key(r["api_key_ciphertext"], master_key))
+            except Exception:
+                continue
+        return out
+
+    existing_keys = await asyncio.to_thread(_existing_plaintexts)
+    for it in items:
+        if it.get("api_key") in existing_keys:
+            it.pop("api_key")
+            it["reason"] = "库中已存在相同密钥"
+    todo = [it for it in items if "api_key" in it]
+
+    created = []
+    if todo:
+        names = gen_bulk_names(req.name_prefix, [r["name"] for r in rows], len(todo))
+        ciphertexts = await asyncio.to_thread(
+            lambda: [encrypt_upstream_key(it["api_key"], master_key) for it in todo]
+        )
+        now = utcnow()
+        params = []
+        for it, name, ciphertext in zip(todo, names, ciphertexts):
+            it["id"] = str(uuid.uuid4())
+            it["name"] = name
+            it["key_prefix"] = mask_secret(it["api_key"])
+            params.extend([
+                it["id"], name, req.provider, ciphertext, it["key_prefix"],
+                req.weight, req.rpm_limit, req.switch_threshold, "active",
+                now, now, proxy_mode, proxy_id,
+            ])
+        placeholders = ", ".join(["(" + ", ".join(["%s"] * 13) + ")"] * len(todo))
+        await asyncio.to_thread(
+            execute,
+            "INSERT INTO upstream_keys "
+            "(id, name, provider, api_key_ciphertext, key_prefix, weight, rpm_limit, switch_threshold, "
+            "status, created_at, updated_at, proxy_mode, proxy_id) VALUES " + placeholders,
+            tuple(params),
+        )
+
+        scheduler = get_scheduler()
+        for it in todo:
+            scheduler.invalidate_key_cache(it["id"])
+        proxy_pool.invalidate()
+
+        await asyncio.to_thread(
+            insert_audit_many,
+            [("create", "upstream_key", it["id"], f"批量创建上游密钥: {it['name']} 出网={proxy_mode}")
+             for it in todo],
+        )
+        created = [{"line": it["line"], "id": it["id"], "name": it["name"], "key_prefix": it["key_prefix"]}
+                   for it in todo]
+
+    skipped = [{"line": it["line"], "reason": it["reason"]} for it in items if "reason" in it]
+    return {
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "created": created,
+        "skipped": skipped,
+        "message": f"成功 {len(created)} 个，跳过 {len(skipped)} 个",
+    }
 
 
 @router.put("/upstreams/{key_id}", tags=["管理员"])

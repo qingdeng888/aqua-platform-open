@@ -175,7 +175,7 @@ function confirmModal(o) {
 GW.confirmModal = confirmModal;
 
 // 通用表单弹窗：字段值经 .value 赋值（不内插属性）；onSubmit 抛错则弹窗保留
-// fields: [{id,label,type(text|number|password|select|scopes),value,placeholder,options:[{value,label,selected|checked}],step}]
+// fields: [{id,label,type(text|number|password|textarea|select|scopes),value,placeholder,options:[{value,label,selected|checked}],step,rows}]
 function formModal(o) {
   var box = $('modalContent');
   box.textContent = '';
@@ -201,6 +201,14 @@ function formModal(o) {
       });
       g.appendChild(sel);
       inputs[f.id] = { kind: 'select', el: sel };
+    } else if (f.type === 'textarea') {
+      // 多行输入（批量粘贴用）：值同样走 .value 赋值，不进属性内插
+      var ta = document.createElement('textarea');
+      ta.rows = f.rows || 8;
+      if (f.placeholder) ta.placeholder = f.placeholder;
+      if (f.value !== undefined && f.value !== null) ta.value = f.value;
+      g.appendChild(ta);
+      inputs[f.id] = { kind: 'textarea', el: ta };
     } else {
       var inp = document.createElement('input');
       inp.type = f.type || 'text';

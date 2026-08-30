@@ -842,6 +842,8 @@ PDF/DOCX/HTML 表格
 
 主密钥 `upstream_master_key`（32 字节 base64）存于 `settings` 表，首次启动自动生成。三条派生路径的隔离性由单测 `tests/test_gateway_security.py::TestDerivationIsolation` 守卫：任一路径的密文用其他路径解密必抛 `InvalidToken`。
 
+> **Fernet 密文不可用于查重**：token 内含随机 IV，同一明文两次加密结果不同，因此"这个密钥是否已入库"只能**解出库内明文再比对**（批量添加 `POST /gw/admin/upstreams/bulk` 即如此）。又因每次加解密都要重跑一遍 HKDF，批量场景的加解密循环一律放进 `asyncio.to_thread`，不占事件循环；单行密文损坏只 `except: continue` 丢掉该行的查重能力，不阻断整批导入。
+
 #### 下游客户端密钥认证路径
 
 客户端密钥（`sk-` + 32 随机字符）在库中同时保留两种形态：
@@ -966,7 +968,7 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 | 端点分类 | 代表路径 | 功能 |
 |----------|----------|------|
 | **认证** | `POST /gw/admin/login` | 管理员密码校验 → 签发 24h HMAC Admin Token（写入 cookie） |
-| **上游密钥** | `/gw/admin/upstreams`、`/upstreams/{id}/reveal`、`/upstreams/health-check` | 上游密钥 CRUD、明文 reveal、启停、探活、解冻、出网模式绑定 |
+| **上游密钥** | `/gw/admin/upstreams`、`/upstreams/bulk`、`/upstreams/{id}/reveal`、`/upstreams/health-check` | 上游密钥 CRUD、批量添加（每行一个密钥、自动命名）、明文 reveal、启停、探活、解冻、出网模式绑定 |
 | **代理池** | `/gw/admin/proxies`、`/proxies/{id}`、`/proxies/{id}/test` | 代理 CRUD（socks5/socks5h/http/https，无认证或账号密码）、启停、连通性测试 |
 | **下游客户** | `/gw/admin/clients`、`/clients/{id}/keys`、`/clients/{id}/keys/{kid}/reveal` | 客户与密钥 CRUD、签发/吊销、明文 reveal、用量查询 |
 | **桶监控** | `/gw/admin/buckets`、`/buckets/{key_id}/{model}/unfreeze` | 桶状态查看、RPM/TPM 统计、手动解冻 |

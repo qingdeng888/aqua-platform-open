@@ -101,6 +101,21 @@ const proxyActs = ['proxy-create', 'proxy-edit', 'proxy-delete', 'proxy-toggle',
 const missingActs = proxyActs.filter((a) => !allJs.includes(`GW.actions['${a}']`));
 check(missingActs.length === 0, `代理池动作齐全 (缺失: ${missingActs.join(', ') || '无'})`);
 
+/* 8b2) 上游密钥页：单个添加与批量添加两条路径并存，批量走 textarea + /upstreams/bulk */
+const keyActs = ['upstream-create', 'upstream-bulk-create', 'upstream-edit', 'upstream-delete',
+  'upstream-reveal', 'upstream-unfreeze'];
+const missingKeyActs = keyActs.filter((a) => !allJs.includes(`GW.actions['${a}']`));
+check(missingKeyActs.length === 0,
+  `上游密钥动作齐全，单个/批量添加并存 (缺失: ${missingKeyActs.join(', ') || '无'})`);
+check(allJs.includes("'/upstreams/bulk'"), '批量添加调用 POST /upstreams/bulk');
+check(/f\.type === 'textarea'/.test(coreSrc) && /createElement\('textarea'\)/.test(coreSrc),
+  'formModal 支持 textarea 字段（批量粘贴多行密钥）');
+// 批量结果面板逐行展示，必须走 textContent，不许把后端回显拼进 innerHTML
+const dataSrc = readFileSync(join(staticDir, 'js', 'console', 'pages-data.js'), 'utf8');
+const bulkPanel = (dataSrc.match(/function showBulkResult\([\s\S]*?\n}/) || [''])[0];
+check(bulkPanel.length > 0 && !/innerHTML/.test(bulkPanel),
+  '批量结果面板仅用 textContent 输出（无 innerHTML）');
+
 /* 8c) 模型测试页：动作齐全 + 自测密钥不落盘 + innerHTML 只写静态模板/已转义组件 */
 const testSrc = readFileSync(join(staticDir, 'js', 'console', 'pages-test.js'), 'utf8');
 const mtActs = ['mtest-refresh', 'mtest-show-key', 'mtest-rotate-key'];

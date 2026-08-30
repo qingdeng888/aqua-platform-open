@@ -101,13 +101,17 @@ GW.R.dash = async function () {
 };
 
 /* ================================================================
- *  上游密钥 — GET/POST /upstreams, PUT/DELETE /upstreams/{id},
+ *  上游密钥 — GET/POST /upstreams, POST /upstreams/bulk,
+ *             PUT/DELETE /upstreams/{id},
  *             POST /upstreams/{id}/unfreeze, GET /upstreams/{id}/reveal
  * ================================================================ */
 GW.R.keys = async function () {
   var c = GW.$('content');
   c.innerHTML = GW.spinner();
-  GW.headerActions('<button class="btn btn-primary btn-sm" data-act="upstream-create">+ 创建密钥</button>');
+  GW.headerActions(
+    '<button class="btn btn-primary btn-sm" data-act="upstream-create">+ 创建密钥</button>' +
+    '<button class="btn btn-sm" data-act="upstream-bulk-create">&#128203; 批量添加</button>'
+  );
   try {
     var list = await api('/upstreams');
     GW.cache.keys = list;
@@ -194,6 +198,29 @@ function buildProxyPayload(v) {
   return { proxy_mode: mode, proxy_id: null };
 }
 
+// 密钥公共参数字段（单个添加与批量添加共用，避免两处默认值漂移）
+function keyParamFields(opts) {
+  return [
+    { id: 'provider', label: 'Provider', value: 'nvidia' },
+    { id: 'weight', label: '权重', type: 'number', value: 1 },
+    { id: 'rpm_limit', label: 'RPM 限制', type: 'number', value: 40 },
+    { id: 'switch_threshold', label: '切换阈值', type: 'number', value: 38 },
+    { id: 'proxy_mode', label: '出网方式', type: 'select', options: proxyModeOptions('direct') },
+    { id: 'proxy_id', label: '绑定代理（仅绑定模式生效）', type: 'select',
+      options: [{ value: '', label: opts.length ? '— 请选择 —' : '— 代理池为空 —', selected: true }].concat(opts) },
+  ];
+}
+
+// 表单值 → 公共参数（默认值与后端 Pydantic 默认值保持一致）
+function keyParamPayload(v) {
+  return {
+    provider: v.provider || 'nvidia',
+    weight: parseInt(v.weight, 10) || 1,
+    rpm_limit: parseInt(v.rpm_limit, 10) || 40,
+    switch_threshold: parseInt(v.switch_threshold, 10) || 38,
+  };
+}
+
 GW.actions['upstream-create'] = async function () {
   var proxies = await loadProxyOptions();
   var opts = proxySelectOptions(proxies, '');
@@ -203,30 +230,87 @@ GW.actions['upstream-create'] = async function () {
     fields: [
       { id: 'name', label: '名称', placeholder: '名称' },
       { id: 'api_key', label: 'API Key', placeholder: 'API 密钥' },
-      { id: 'provider', label: 'Provider', value: 'nvidia' },
-      { id: 'weight', label: '权重', type: 'number', value: 1 },
-      { id: 'rpm_limit', label: 'RPM 限制', type: 'number', value: 40 },
-      { id: 'switch_threshold', label: '切换阈值', type: 'number', value: 38 },
-      { id: 'proxy_mode', label: '出网方式', type: 'select', options: proxyModeOptions('direct') },
-      { id: 'proxy_id', label: '绑定代理（仅绑定模式生效）', type: 'select',
-        options: [{ value: '', label: opts.length ? '— 请选择 —' : '— 代理池为空 —', selected: true }].concat(opts) },
-    ],
+    ].concat(keyParamFields(opts)),
     submitText: '创建',
     onSubmit: async function (v) {
       if (!v.name || !v.api_key) throw new Error('名称和 API Key 不能为空');
-      var body = {
-        name: v.name, api_key: v.api_key, provider: v.provider || 'nvidia',
-        weight: parseInt(v.weight, 10) || 1,
-        rpm_limit: parseInt(v.rpm_limit, 10) || 40,
-        switch_threshold: parseInt(v.switch_threshold, 10) || 38,
-      };
-      Object.assign(body, buildProxyPayload(v));
+      var body = { name: v.name, api_key: v.api_key };
+      Object.assign(body, keyParamPayload(v), buildProxyPayload(v));
       await api('/upstreams', { method: 'POST', body: JSON.stringify(body) });
       GW.toast('创建成功', 'success');
       GW.R.keys();
     },
   });
 };
+
+// 批量添加：每行一个密钥，名称由后端按「前缀-序号」自动生成；单个添加路径保持不变
+GW.actions['upstream-bulk-create'] = async function () {
+  var proxies = await loadProxyOptions();
+  var opts = proxySelectOptions(proxies, '');
+  GW.formModal({
+    title: '批量添加上游密钥',
+    hint: '每行一个密钥，空行与 # 开头的注释行忽略；名称自动生成，序号从库内同前缀最大值续排。'
+      + '与库内已有密钥或本批内重复的行会被跳过，单次上限 200 行。',
+    fields: [
+      { id: 'api_keys', label: '密钥列表（每行一个）', type: 'textarea', rows: 10,
+        placeholder: 'nvapi-xxxxxxxxxxxx\nnvapi-yyyyyyyyyyyy\n# 以 # 开头的行会被忽略' },
+      { id: 'name_prefix', label: '名称前缀（生成 前缀-01、前缀-02…）', value: 'nv' },
+    ].concat(keyParamFields(opts)),
+    submitText: '批量创建',
+    onSubmit: async function (v) {
+      if (!v.api_keys) throw new Error('请粘贴至少一行密钥');
+      var body = { api_keys: v.api_keys, name_prefix: v.name_prefix || 'nv' };
+      Object.assign(body, keyParamPayload(v), buildProxyPayload(v));
+      var r = await api('/upstreams/bulk', { method: 'POST', body: JSON.stringify(body) });
+      GW.toast(r.message || '批量创建完成', (r.created_count || 0) > 0 ? 'success' : 'error');
+      GW.R.keys();
+      if ((r.skipped_count || 0) > 0) {
+        // 有跳过行时接管弹窗展示逐行结果，让管理员知道漏了哪几行、为什么
+        showBulkResult(r);
+        return false;
+      }
+    },
+  });
+};
+
+// 批量导入结果面板：逐行成功/跳过原因，全部经 textContent 写入（不回传密钥明文，只有掩码前缀）
+function showBulkResult(r) {
+  var box = GW.$('modalContent');
+  box.textContent = '';
+  var head = document.createElement('div'); head.className = 'modal-header';
+  var h3 = document.createElement('h3'); h3.textContent = '批量添加结果';
+  var x = document.createElement('button'); x.className = 'modal-close'; x.textContent = '×'; x.dataset.act = 'dismiss-modal';
+  head.appendChild(h3); head.appendChild(x);
+
+  var body = document.createElement('div'); body.className = 'modal-body';
+  var sum = document.createElement('p'); sum.className = 'mb-8';
+  sum.textContent = '成功 ' + (r.created_count || 0) + ' 个，跳过 ' + (r.skipped_count || 0) + ' 个。';
+  body.appendChild(sum);
+
+  var section = function (title, lines) {
+    if (!lines.length) return;
+    var t = document.createElement('div'); t.className = 'card-title mt-12'; t.textContent = title;
+    body.appendChild(t);
+    lines.forEach(function (text) {
+      var row = document.createElement('div'); row.className = 'text-sm'; row.textContent = text;
+      body.appendChild(row);
+    });
+  };
+  section('已创建 ' + (r.created_count || 0) + ' 个', (r.created || []).map(function (it) {
+    return '第 ' + it.line + ' 行 → ' + it.name + '（' + it.key_prefix + '）';
+  }));
+  section('已跳过 ' + (r.skipped_count || 0) + ' 个', (r.skipped || []).map(function (it) {
+    return '第 ' + it.line + ' 行：' + it.reason;
+  }));
+
+  var foot = document.createElement('div'); foot.className = 'modal-footer';
+  var close = document.createElement('button'); close.className = 'btn btn-primary'; close.textContent = '知道了';
+  close.dataset.act = 'dismiss-modal';
+  foot.appendChild(close);
+
+  box.appendChild(head); box.appendChild(body); box.appendChild(foot);
+  GW.$('modalOverlay').classList.add('show');
+}
 
 GW.actions['upstream-edit'] = async function (ds) {
   var k = (GW.cache.keys || [])[Number(ds.idx)] || {};

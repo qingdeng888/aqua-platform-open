@@ -48,8 +48,9 @@ v12.1 为纯中转网关补上**出网通道治理**：上游密钥不再只能�
 | **模型测试** | 新增「模型测试」页（11 → 12 页）与 `/gw/admin/model-test/*`：实时模型列表 + 搜索/全选 + 并发批量探测，可选「直连 NVIDIA 上游」或「走本网关中转」两条通道 |
 | **容器化** | 新增 `Dockerfile`（多阶段、非 root、内建健康检查）+ `docker-compose.yml`（网关 + PostgreSQL 17，默认拉 CI 预构建镜像）+ `docker-compose.local.yml`（本机源码构建覆盖层）+ `.dockerignore`，`docker compose pull && docker compose up -d` 起全栈 |
 | **CI/CD** | 新增 `.github/workflows/docker-image.yml`：推送即跑「后端单测 + 前端静态检查」，全绿才构建镜像并推送到 GHCR，无需配置任何 Secret；`latest` 恒为 `amd64` + `arm64` 双架构 |
+| **上游密钥录入** | 单个添加之外新增**批量添加**：一行一个密钥粘贴进去，名称按「前缀-序号」自动生成，逐行报告成功/跳过原因（批内重复、库内已存在、含空格、长度越界），单次上限 200 行 |
 | **管理员密码** | 收敛为**单一明文变量** `ACU_ADMIN_PASSWORD`：删除 bcrypt 哈希方案与 `bcrypt` 依赖，配置即 `.env` 写一行，不必装包也不必手搓哈希 |
-| **工程化** | 测试基线 121 个后端单测 + 28 项前端静态检查；新增依赖 `httpx[socks]`，移除 `bcrypt` |
+| **工程化** | 测试基线 151 个后端单测 + 32 项前端静态检查；新增依赖 `httpx[socks]`，移除 `bcrypt` |
 
 ---
 
@@ -71,7 +72,7 @@ v12.0 将项目**收敛为纯中转网关**（类似 CLI proxy API 形态）：�
 
 | 特性 | 说明 |
 |------|------|
-| **密钥池化** | 多个 NVIDIA NIM 上游密钥整合为统一入口，密钥 Fernet+HKDF 加密存储 |
+| **密钥池化** | 多个 NVIDIA NIM 上游密钥整合为统一入口，密钥 Fernet+HKDF 加密存储；录入支持单个添加与批量粘贴（一行一个、自动命名、逐行查重） |
 | **密钥转换** | 下游签发 `sk-` 客户端密钥（仅存 SHA-256 哈希查库），与上游密钥完全隔离 |
 | **统一 API** | OpenAI 兼容：`/v1/chat/completions`、`/v1/embeddings`、`/v1/models` |
 | **17 算法互锁调度** | RPM、健康度、冷却、预热、熔断等 17 个协同算法计算最优密钥选择 |
@@ -629,6 +630,7 @@ WantedBy=multi-user.target
 | 查看日志 | 裸机看 systemd journal；Docker `docker compose logs -f --tail=200 gateway`（json-file 已限 10m×3） |
 | 进库操作 | Docker `docker compose exec db psql -U aqua -d aqua_gateway`；备份恢复见[Docker Compose 部署](#docker-compose-部署) |
 | 版本升级 | 裸机：拉代码 + 重启服务；Docker：`docker compose pull && docker compose up -d`（本机构建版加两个 `-f` 并带 `--build`）。两者的建表与迁移都在启动 lifespan 内幂等执行 |
+| 批量导入上游密钥 | 控制台「上游密钥」页 →「批量添加」：一行一个密钥粘贴，空行与 `#` 注释行忽略，名称按「前缀-序号」自动生成（序号从库内同前缀最大值续排并跳过已占用名）。批内重复 / 库内已存在 / 含空格 / 长度越界的行逐行给出跳过原因，其余行照常入库；单次上限 200 行，再多请分批。等价 API：`POST /gw/admin/upstreams/bulk` |
 | 改管理员密码 | 改 `.env` 的 `ACU_ADMIN_PASSWORD` 后重启（`docker compose restart gateway` / `systemctl restart aqua-gateway`）。密码不入库、无需迁移。注意**已签发的 24h 管理 Token 不会失效**——Token 由库内 `admin_settings.gateway_secret` 签名，与密码无关；密码疑似泄露时需一并轮换该密钥（`docker compose exec db psql -U aqua -d aqua_gateway -c "DELETE FROM admin_settings WHERE key='gateway_secret'"` 后重启，启动时会重新随机生成，全部旧 Token 立即作废） |
 | 改配置生效 | `.env` 改动需重启进程/容器（`docker compose restart gateway`）；控制台「系统配置」项为热生效，无需重启 |
 
@@ -637,12 +639,12 @@ WantedBy=multi-user.target
 ## 开发与测试
 
 ```bash
-# 后端单元测试（121 个：安全体系 / 管理员密码 / 时间戳契约 / 代理池 / 统一异常 / 模型测试）
+# 后端单元测试（151 个：安全体系 / 管理员密码 / 时间戳契约 / 代理池 / 统一异常 / 模型测试 / 上游密钥批量添加）
 python3 -m venv .venv
 .venv/bin/pip install -r gateway/requirements.txt pytest pytest-asyncio
 .venv/bin/python -m pytest tests/ -v
 
-# 前端静态检查（28 项：引用完整性 / 无内联事件 / XSS 纪律 / API 契约锚点 / 路由注册 / 代理池动作 / 模型测试守卫 / 时间本地化渲染 / 已下线端点守卫）
+# 前端静态检查（32 项：引用完整性 / 无内联事件 / XSS 纪律 / API 契约锚点 / 路由注册 / 代理池动作 / 上游密钥单个·批量双路径 / 模型测试守卫 / 时间本地化渲染 / 已下线端点守卫）
 node tests/static-smoke.mjs
 
 # 单文件语法检查
@@ -675,7 +677,7 @@ aqua-platform-open/
 │   │   ├── platforms/        # 上游适配器 nvidia/openai（实验性）
 │   │   └── static/           # 控制台 UI（console.html + 4 个 JS 模块）
 │   └── requirements.txt
-├── tests/                    # pytest ×121 + 前端静态检查 ×28
+├── tests/                    # pytest ×151 + 前端静态检查 ×32
 ├── docs/rules/               # 并发与限流规则文档
 ├── .github/workflows/        # CI：docker-image.yml（测试通过才构建并推送 GHCR 镜像）
 ├── conftest.py               # 统一 sys.path
@@ -713,7 +715,8 @@ aqua-platform-open/
 - **预构建镜像 + local 覆盖层**：`docker-compose.yml` 的 `gateway` 改为消费预构建镜像 `${GW_IMAGE:-ghcr.io/qingdeng888/aqua-platform-open}:${GW_IMAGE_TAG:-latest}`（移除 `build` 段），部署与升级变为 `docker compose pull && docker compose up -d`；新增 `docker-compose.local.yml` 覆盖层（`build` + `image: aqua-gateway:local` + `pull_policy: build`）供本机源码构建，只重定义 `gateway`，`db`/网络/数据卷全部继承，两种方式共用同一 `pgdata` 卷可无损来回切换；`.env.example` 新增 `GW_IMAGE`/`GW_IMAGE_TAG` 两项
 - **管理员密码收敛为单一明文变量**：删除 bcrypt 哈希方案（`ACU_ADMIN_PASSWORD_HASH` 变量、`bcrypt.checkpw` 分支、`bcrypt>=4.0.0` 依赖一并移除），只保留 `ACU_ADMIN_PASSWORD` 明文 + `hmac.compare_digest` 恒定时间比较。动因：两套并存带来的复杂度远大于收益——`.env` 本就明文存着库密码与加密主密钥，哈希再包一层的边际收益很低，而"先装 bcrypt 再手搓哈希"在 Debian 上会被 PEP 668 的 `externally-managed-environment` 挡住，且哈希含 `$` 会被 docker compose 对 `env_file` 做变量插值静默截断（`$2b$12$bdJq…` → `$2b$12.yz…`），表现为配置无误却怎么都登不上。顺带修掉两个登录口的行为分叉：此前 `admin_api.py` 只认哈希、`admin_panel.py` 两者都认，只配明文时面板能进而控制台直接启动失败；现在两者读同一变量。校验逻辑收进 `_verify_admin_password()`，空值先挡再比较（`compare_digest(b"", b"")` 为真），登录端点去掉 `to_thread`（恒定时间比较为微秒级，无需线程池）
 - **文档（Docker 踩坑）**：`env_file` 里的值含未加引号的 `$xxx` 会被 docker compose 当变量插值静默替换/截断——管理员密码若含 `$` 请用单引号包裹；`.env.example` 已标注
-- **测试**：后端 121 passed（代理 URL/客户端/选路 21 个 + 代理凭据加密与三路派生隔离用例；新增 `utc_from_ts` 格式/取值 3 个 + 写库路径不得回退到本地时区写入的守卫 2 个；新增模型测试 45 个：提示词归一 / `max_tokens` 收敛 / 回复与错误提取三态 / 路由与常量契约 / `extra="forbid"` / 不外泄凭据的源码守卫；新增管理员密码 16 个：明文校验（含非 ASCII 与含 `$` 口令）/ 不做 strip 与大小写归一 / 空配置拒绝一切登录 / `[FATAL]` 文案须点名变量名 / 登录端点必须走统一校验函数 / 两个登录口与 requirements 不得残留哈希方案）；前端静态检查 28 项（代理池动作与出网徽标守卫；新增 `fmtTime` 本地化渲染与详情页无裸时间戳守卫；新增模型测试页动作齐全、自测密钥不落盘、可中止、`innerHTML` 只写静态模板、`max_tokens` 默认值前后端一致守卫）
+- **上游密钥批量添加**：新增 `POST /gw/admin/upstreams/bulk` 与控制台「上游密钥」页第二个按钮「批量添加」——多行文本框粘贴，一行一个密钥，空行与 `#` 注释行忽略；名称由后端按 `{前缀}-{序号}` 自动生成（默认前缀 `nv`，序号从库内同前缀最大值续排并跳过已被占用的名字，因为 `upstream_keys.name` 无唯一索引，重名不报错但会让运维分不清）。逐行报告结果：批内重复、库中已存在、含空格（多半是粘贴时把两个密钥连成一行）、长度越界的行给出原因并跳过，其余行照常入库；单次上限 200 行（一次请求里做上千次 HKDF+Fernet 不合适）。库内查重必须**解密后比对明文**——Fernet 密文带随机 IV，同一明文两次加密结果不同，比密文永远查不到重复；解密与加密循环都走 `asyncio.to_thread`（每次都要重跑一遍 HKDF）。全部有效行走**一条多值参数化 INSERT**，要么全进要么全不进，不留"导入一半"的中间态；审计仍是一密钥一行（保留 `target_id` 可追溯性），经新增的 `database.insert_audit_many()` 一次往返写入。响应只回行号 / id / 名称 / `mask_secret` 掩码前缀，**绝不回传明文**，跳过原因也不含密钥内容；前端结果面板全程 `textContent` 输出。**单个添加路径（`POST /upstreams` + `GW.actions['upstream-create']`）行为不变**，并由一条 pytest 源码契约与一项前端静态检查双向锁定
+- **测试**：后端 151 passed（代理 URL/客户端/选路 21 个 + 代理凭据加密与三路派生隔离用例；新增 `utc_from_ts` 格式/取值 3 个 + 写库路径不得回退到本地时区写入的守卫 2 个；新增模型测试 45 个：提示词归一 / `max_tokens` 收敛 / 回复与错误提取三态 / 路由与常量契约 / `extra="forbid"` / 不外泄凭据的源码守卫；新增管理员密码 16 个：明文校验（含非 ASCII 与含 `$` 口令）/ 不做 strip 与大小写归一 / 空配置拒绝一切登录 / `[FATAL]` 文案须点名变量名 / 登录端点必须走统一校验函数 / 两个登录口与 requirements 不得残留哈希方案；新增上游密钥批量添加 30 个：逐行解析（行号含空行注释、CRLF、含空格、长度上下边界含端点、批内查重指向首次出现行、跳过原因绝不回显密钥）/ 自动命名（空库从 01 起、按最大值续排、其他前缀不串号、跳过已占用名、`nv-99` → `nv-100`、空白前缀回落默认、超长前缀截断、正则元字符前缀按字面量处理）/ 源码契约（单个添加路径保留、批量端点注册与鉴权、响应只带掩码前缀、行数上限、解密查重、双缓存失效、一密钥一审计行））；前端静态检查 32 项（代理池动作与出网徽标守卫；新增 `fmtTime` 本地化渲染与详情页无裸时间戳守卫；新增模型测试页动作齐全、自测密钥不落盘、可中止、`innerHTML` 只写静态模板、`max_tokens` 默认值前后端一致守卫；新增上游密钥单个/批量双路径动作齐全、`/upstreams/bulk` 调用锚点、`formModal` 支持 textarea、批量结果面板无 `innerHTML`）
 
 ### v12.0.0（2026-08-29）
 

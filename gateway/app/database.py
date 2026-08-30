@@ -217,6 +217,26 @@ def insert_audit(action: str, target_type: str, target_id: str, detail: str) -> 
     )
 
 
+def insert_audit_many(entries: list) -> None:
+    """批量插入审计日志，一次往返
+
+    entries 为 (action, target_type, target_id, detail) 元组列表；空列表直接返回。
+    供批量导入类操作使用——仍保持"一条记录一个目标"，便于按 target_id 追溯单个对象。
+    """
+    if not entries:
+        return
+    params = []
+    now = utcnow()
+    for action, target_type, target_id, detail in entries:
+        params.extend([str(uuid.uuid4()), action, target_type, target_id, detail, now])
+    placeholders = ", ".join(["(%s, 'admin', %s, %s, %s, %s, %s)"] * len(entries))
+    execute(
+        "INSERT INTO audit_logs (id, operator, action, target_type, target_id, detail, created_at) "
+        "VALUES " + placeholders,
+        tuple(params),
+    )
+
+
 def init_db() -> None:
     """创建所有表（v10.0 完整表结构，PostgreSQL 语法）"""
     conn = _get_conn()
