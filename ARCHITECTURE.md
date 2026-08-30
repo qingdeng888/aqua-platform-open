@@ -843,6 +843,8 @@ PDF/DOCX/HTML 表格
 主密钥 `upstream_master_key`（32 字节 base64）存于 `settings` 表，首次启动自动生成。三条派生路径的隔离性由单测 `tests/test_gateway_security.py::TestDerivationIsolation` 守卫：任一路径的密文用其他路径解密必抛 `InvalidToken`。
 
 > **Fernet 密文不可用于查重**：token 内含随机 IV，同一明文两次加密结果不同，因此"这个密钥是否已入库"只能**解出库内明文再比对**（批量添加 `POST /gw/admin/upstreams/bulk` 即如此）。又因每次加解密都要重跑一遍 HKDF，批量场景的加解密循环一律放进 `asyncio.to_thread`，不占事件循环；单行密文损坏只 `except: continue` 丢掉该行的查重能力，不阻断整批导入。
+>
+> **代理池是反例，不要照抄解密查重**：`proxies` 表只把密码列加密，代理的身份信息（`scheme`/`host`/`port`/`username`）都是明文列，因此 `POST /gw/admin/proxies/bulk` 的查重只需一条 `SELECT name, scheme, host, port, username FROM proxies`，完全不碰解密（有源码级契约测试守卫"批量代理添加函数体内不得出现 `decrypt`"）。判重口径是**四元组**而非"地址+端口"：住宅代理常以用户名区分会话/出口，同 IP 同端口不同账号是不同代理；反之同端点同账号只是口令不同，几乎只会是粘贴错误，按重复跳过。
 
 #### 下游客户端密钥认证路径
 
@@ -969,7 +971,7 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 |----------|----------|------|
 | **认证** | `POST /gw/admin/login` | 管理员密码校验 → 签发 24h HMAC Admin Token（写入 cookie） |
 | **上游密钥** | `/gw/admin/upstreams`、`/upstreams/bulk`、`/upstreams/{id}/reveal`、`/upstreams/health-check` | 上游密钥 CRUD、批量添加（每行一个密钥、自动命名）、明文 reveal、启停、探活、解冻、出网模式绑定 |
-| **代理池** | `/gw/admin/proxies`、`/proxies/{id}`、`/proxies/{id}/test` | 代理 CRUD（socks5/socks5h/http/https，无认证或账号密码）、启停、连通性测试 |
+| **代理池** | `/gw/admin/proxies`、`/proxies/bulk`、`/proxies/{id}`、`/proxies/{id}/test` | 代理 CRUD（socks5/socks5h/http/https，无认证或账号密码）、批量添加（每行一个 `协议://[用户名:密码@]地址:端口`、自动命名）、启停、连通性测试 |
 | **下游客户** | `/gw/admin/clients`、`/clients/{id}/keys`、`/clients/{id}/keys/{kid}/reveal` | 客户与密钥 CRUD、签发/吊销、明文 reveal、用量查询 |
 | **桶监控** | `/gw/admin/buckets`、`/buckets/{key_id}/{model}/unfreeze` | 桶状态查看、RPM/TPM 统计、手动解冻 |
 | **算法** | `/gw/admin/algorithms/realtime`、`/algorithm-stats`、`/algorithm/{num}` | 17 算法实时状态、统计与单算法详情 |
@@ -1233,7 +1235,7 @@ curl -X POST http://localhost:8000/gw/admin/maintenance \
 | NIM模型目录 | `GET /gw/admin/nim/models` | 可用模型与能力 |
 | 解冻桶/密钥 | `POST /gw/admin/buckets/{key_id}/{model}/unfreeze`、`/upstreams/{key_id}/unfreeze` | 手动解除冷却/冻结 |
 | 熔断器重置 | `POST /gw/admin/circuit-breakers/reset` | 手动复位熔断状态 |
-| 代理池管理 | `/gw/admin/proxies`、`POST /proxies/{id}/test` | 代理增删改查、启停与连通性测试 |
+| 代理池管理 | `/gw/admin/proxies`、`POST /proxies/bulk`、`POST /proxies/{id}/test` | 代理增删改查、批量添加、启停与连通性测试 |
 | 清理请求日志 | `DELETE /gw/admin/request-logs/cleanup?days=N` | 手动清理（另有每 6 小时自动任务） |
 | 数据库管理 | `/gw/dbadmin` | SQLAdmin CRUD |
 
@@ -1317,7 +1319,23 @@ proxies                                upstream_keys（v12.1 迁移新增两列�
 - `build_proxy_url()` 对用户名/密码做 percent-encoding，防止 `@ : /` 破坏 URL 结构导致凭据落入 host 段
 - 连通性测试解密密码仅在内存中构造一次性客户端，访问上游 `/models`；拿到任意 HTTP 状态即视为通道可用（避免把上游 401 误判为代理不通）
 
-### 12.6 依赖
+### 12.6 批量录入（`POST /gw/admin/proxies/bulk`）
+
+多行文本，一行一个 `scheme://[user:pass@]host:port`，与单个添加 `POST /proxies` **并存**（后者行为不变，由源码契约测试锁定）。
+
+| 环节 | 实现要点 |
+|------|---------|
+| 行解析 | 纯函数 `parse_bulk_proxies()`（`gateway/app/admin_api.py`），用标准库 `urlsplit`：密码含 `@` 时按**最右侧** `@` 切 userinfo、含 `:` 时按**首个** `:` 分割用户名与密码；空行与 `#` 注释行不进结果但**仍占行号**，行号要对应用户在输入框里看到的行 |
+| 编码对称 | 用户名/密码解析后过一遍 `unquote()`，与 `build_proxy_url()` 的 `quote(safe="")` 互逆；单测校验 `解析 → 拼装 → 再解析` 凭据逐字不变 |
+| 逐行拒收 | 缺协议前缀 / 协议不在白名单 / 缺地址 / 端口缺失或不在 1-65535（`urlsplit` 放行 `:0`，此处额外对齐 `build_proxy_url` 的下界）/ 地址后带路径参数 fragment（裸尾斜杠容忍）/ IPv6 字面量 / 有密码无用户名。跳过原因**绝不回显原始行**——行里带着密码明文，而原因要进响应体 |
+| IPv6 | 明确拒收：`build_proxy_url()` 不补方括号，收下即产生不可用记录（单个添加同受此限，属已知限制而非批量特有） |
+| 查重 | 四元组 `(scheme, host, port, username)`，一条 `SELECT` 明文列比对，**不解密**（对照 §9.2 上游密钥必须解密的原因） |
+| 命名 | 复用 `gen_bulk_names()`（与上游密钥批量添加同一实现），`{前缀}-{序号}`，默认前缀 `px`，序号从库内同前缀最大值续排并跳过已占用名 |
+| 写入 | 有密码的行整批在 `asyncio.to_thread` 内加密（每次都要重跑 HKDF），随后一条多值参数化 INSERT，要么全进要么全不进；成功后 `proxy_pool.invalidate()` 让 5 秒快照立即失效 |
+| 审计 | 一代理一行，经 `insert_audit_many()` 一次往返写入，保留 `target_id` 可追溯性 |
+| 响应 | 行号 / id / 名称 / 协议 / 地址 / 端口 / 用户名 / `has_auth`，**不含密码**；单次上限 `BULK_MAX_LINES = 200` |
+
+### 12.7 依赖
 
 SOCKS 支持来自 `httpx[socks]`（`socksio`），已声明于 `gateway/requirements.txt`。`httpx` 0.28 使用单数 `proxy=` 参数（`proxies=` 已移除），协议白名单为 `http` / `https` / `socks5` / `socks5h`。
 

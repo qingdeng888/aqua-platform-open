@@ -97,7 +97,8 @@ check(pages.length >= 12 && unregistered.length === 0,
 
 /* 8b) 代理池页面：出网模式三态齐全 + 池内代理增删改测动作已注册 */
 check(/GW\.proxyModeBadge\s*=/.test(allJs), '前端提供出网模式徽标 GW.proxyModeBadge');
-const proxyActs = ['proxy-create', 'proxy-edit', 'proxy-delete', 'proxy-toggle', 'proxy-test'];
+const proxyActs = ['proxy-create', 'proxy-bulk-create', 'proxy-edit', 'proxy-delete',
+  'proxy-toggle', 'proxy-test'];
 const missingActs = proxyActs.filter((a) => !allJs.includes(`GW.actions['${a}']`));
 check(missingActs.length === 0, `代理池动作齐全 (缺失: ${missingActs.join(', ') || '无'})`);
 
@@ -115,6 +116,18 @@ const dataSrc = readFileSync(join(staticDir, 'js', 'console', 'pages-data.js'), 
 const bulkPanel = (dataSrc.match(/function showBulkResult\([\s\S]*?\n}/) || [''])[0];
 check(bulkPanel.length > 0 && !/innerHTML/.test(bulkPanel),
   '批量结果面板仅用 textContent 输出（无 innerHTML）');
+
+/* 8b3) 代理池批量添加：与单个添加并存，走 textarea + /proxies/bulk，结果面板与密钥批量共用 */
+check(allJs.includes("GW.actions['proxy-create']") && allJs.includes("GW.actions['proxy-bulk-create']"),
+  '代理池单个添加与批量添加两条路径并存');
+check(allJs.includes("'/proxies/bulk'"), '代理批量添加调用 POST /proxies/bulk');
+check(/showBulkResult\(r,\s*function/.test(dataSrc),
+  '代理批量结果复用 showBulkResult（只换「已创建」文案，不另写一套面板）');
+const proxyBulkAct = (dataSrc.match(/GW\.actions\['proxy-bulk-create'\][\s\S]*?\n};/) || [''])[0];
+check(/proxy_urls/.test(proxyBulkAct) && /type: 'textarea'/.test(proxyBulkAct),
+  '代理批量添加用 textarea 收多行 proxy_urls');
+check(proxyBulkAct.length > 0 && !/innerHTML/.test(proxyBulkAct),
+  '代理批量添加动作内无 innerHTML');
 
 /* 8c) 模型测试页：动作齐全 + 自测密钥不落盘 + innerHTML 只写静态模板/已转义组件 */
 const testSrc = readFileSync(join(staticDir, 'js', 'console', 'pages-test.js'), 'utf8');

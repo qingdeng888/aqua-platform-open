@@ -273,8 +273,9 @@ GW.actions['upstream-bulk-create'] = async function () {
   });
 };
 
-// 批量导入结果面板：逐行成功/跳过原因，全部经 textContent 写入（不回传密钥明文，只有掩码前缀）
-function showBulkResult(r) {
+// 批量导入结果面板：逐行成功/跳过原因，全部经 textContent 写入（响应不含密钥/密码明文）
+// fmtCreated 由调用方给出「已创建」行的文案，上游密钥与代理池共用本面板
+function showBulkResult(r, fmtCreated) {
   var box = GW.$('modalContent');
   box.textContent = '';
   var head = document.createElement('div'); head.className = 'modal-header';
@@ -296,7 +297,7 @@ function showBulkResult(r) {
       body.appendChild(row);
     });
   };
-  section('已创建 ' + (r.created_count || 0) + ' 个', (r.created || []).map(function (it) {
+  section('已创建 ' + (r.created_count || 0) + ' 个', (r.created || []).map(fmtCreated || function (it) {
     return '第 ' + it.line + ' 行 → ' + it.name + '（' + it.key_prefix + '）';
   }));
   section('已跳过 ' + (r.skipped_count || 0) + ' 个', (r.skipped || []).map(function (it) {
@@ -391,13 +392,16 @@ GW.actions['upstream-delete'] = function (ds) {
 };
 
 /* ================================================================
- *  代理池 — GET/POST /proxies, PUT/DELETE /proxies/{id},
- *           POST /proxies/{id}/test
+ *  代理池 — GET/POST /proxies, POST /proxies/bulk,
+ *           PUT/DELETE /proxies/{id}, POST /proxies/{id}/test
  * ================================================================ */
 GW.R.proxies = async function () {
   var c = GW.$('content');
   c.innerHTML = GW.spinner();
-  GW.headerActions('<button class="btn btn-primary btn-sm" data-act="proxy-create">+ 添加代理</button>');
+  GW.headerActions(
+    '<button class="btn btn-primary btn-sm" data-act="proxy-create">+ 添加代理</button>' +
+    '<button class="btn btn-sm" data-act="proxy-bulk-create">&#128203; 批量添加</button>'
+  );
   try {
     var d = await api('/proxies');
     var list = (d && d.proxies) || [];
@@ -420,7 +424,7 @@ GW.R.proxies = async function () {
     ]));
 
     if (!list.length) {
-      c.insertAdjacentHTML('beforeend', GW.emptyState('代理池为空，点击右上角「添加代理」录入 SOCKS5 / HTTP 代理', '🌐'));
+      c.insertAdjacentHTML('beforeend', GW.emptyState('代理池为空，点击右上角「添加代理」录入 SOCKS5 / HTTP 代理（也可「批量添加」粘贴多行）', '🌐'));
       return;
     }
 
@@ -499,6 +503,46 @@ GW.actions['proxy-create'] = function () {
       });
       GW.toast('添加成功', 'success');
       GW.R.proxies();
+    },
+  });
+};
+
+// 批量添加：每行一个 scheme://[user:pass@]host:port，名称由后端按「前缀-序号」自动生成；
+// 单个添加路径保持不变
+GW.actions['proxy-bulk-create'] = function () {
+  GW.formModal({
+    title: '批量添加代理',
+    hint: '每行一个代理地址，格式 协议://用户名:密码@地址:端口，无认证则省略凭据部分（如 http://1.2.3.4:8080）。'
+      + '协议支持 socks5 / socks5h / http / https；空行与 # 开头的注释行忽略；'
+      + '名称自动生成，序号从库内同前缀最大值续排；与库内已有或本批内重复（协议+地址+端口+用户名相同）'
+      + '的行会被跳过，单次上限 200 行。密码若含 @ 或 : 请写成 %40 / %3A。',
+    fields: [
+      { id: 'proxy_urls', label: '代理列表（每行一个）', type: 'textarea', rows: 10,
+        placeholder: 'http://user:password@1.2.3.4:8080\nsocks5://5.6.7.8:1080\n# 以 # 开头的行会被忽略' },
+      { id: 'name_prefix', label: '名称前缀（生成 前缀-01、前缀-02…）', value: 'px' },
+      { id: 'remark', label: '备注（整批共用，可选）', placeholder: '如 供应商A 2026-08 批次' },
+    ],
+    submitText: '批量添加',
+    onSubmit: async function (v) {
+      if (!v.proxy_urls) throw new Error('请粘贴至少一行代理地址');
+      var r = await api('/proxies/bulk', {
+        method: 'POST',
+        body: JSON.stringify({
+          proxy_urls: v.proxy_urls,
+          name_prefix: v.name_prefix || 'px',
+          remark: v.remark || null,
+        }),
+      });
+      GW.toast(r.message || '批量添加完成', (r.created_count || 0) > 0 ? 'success' : 'error');
+      GW.R.proxies();
+      if ((r.skipped_count || 0) > 0) {
+        // 有跳过行时接管弹窗展示逐行结果，让管理员知道漏了哪几行、为什么
+        showBulkResult(r, function (it) {
+          return '第 ' + it.line + ' 行 → ' + it.name + '（' + it.scheme + '://' + it.host + ':' + it.port
+            + (it.has_auth ? ' 认证=有' : ' 认证=无') + '）';
+        });
+        return false;
+      }
     },
   });
 };

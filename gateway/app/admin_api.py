@@ -25,6 +25,7 @@ import uuid
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, Request, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -81,13 +82,14 @@ def _verify_admin_password(password: str) -> bool:
     return hmac.compare_digest(password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
 
 
-# ========== 上游密钥批量添加常量 ==========
+# ========== 批量添加常量（上游密钥 / 代理池共用） ==========
 
 BULK_MAX_LINES = 200        # 单次批量上限：再多请分批，避免一次请求里做上千次 HKDF+Fernet
 BULK_KEY_MIN_LEN = 8        # 低于此长度的行一律当粘贴残渣拒掉
 BULK_KEY_MAX_LEN = 512
-BULK_NAME_PREFIX = "nv"     # 自动命名前缀默认值
+BULK_NAME_PREFIX = "nv"     # 上游密钥自动命名前缀默认值
 BULK_NAME_PREFIX_MAX = 32
+BULK_PROXY_NAME_PREFIX = "px"  # 代理自动命名前缀默认值
 
 
 # ========== 请求模型 ==========
@@ -134,6 +136,12 @@ class ProxyCreateRequest(BaseModel):
     username: Optional[str] = None  # 留空表示无认证代理
     password: Optional[str] = None
     remark: Optional[str] = None
+
+class ProxyBulkCreateRequest(BaseModel):
+    """批量添加代理：proxy_urls 为多行文本，每行一个 scheme://[user:pass@]host:port"""
+    proxy_urls: str
+    name_prefix: str = BULK_PROXY_NAME_PREFIX  # 自动命名格式 {前缀}-{序号}
+    remark: Optional[str] = None               # 整批共用备注
 
 class ProxyUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -392,6 +400,75 @@ async def _validate_proxy_binding(mode: Optional[str], proxy_id: Optional[str]) 
     return mode, proxy_id
 
 
+def parse_bulk_proxies(raw: str) -> list:
+    """多行文本 → 逐行代理解析结果，保持输入顺序
+
+    每行一个代理 URL：`scheme://[user:pass@]host:port`，例如
+    `http://user:pass@1.2.3.4:8080`；无认证代理写 `http://1.2.3.4:8080`。
+    空行与 `#` 注释行直接忽略（不进结果），方便在粘贴的代理清单里写备注。
+
+    解析交给 urlsplit 而非手写切分——它已正确处理三件容易写错的事：密码里含 `@`
+    时从最右侧切 userinfo、密码里含 `:` 时只按首个 `:` 分割、以及 IPv6 的方括号写法。
+    用户名/密码再过一遍 unquote，与 build_proxy_url() 的 quote 形成往返对称。
+
+    跳过原因绝不回显原始行内容——行里带着密码明文，而原因是要进响应体的。
+    """
+    seen = {}
+    out = []
+    for lineno, line in enumerate((raw or "").splitlines(), start=1):
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+
+        def skip(reason: str) -> None:
+            out.append({"line": lineno, "reason": reason})
+
+        if "://" not in text:
+            skip("缺少协议前缀，格式应为 scheme://[user:pass@]host:port")
+            continue
+        try:
+            u = urlsplit(text)
+            port = u.port          # 非数字或超出 0-65535 时在此抛 ValueError
+            host = u.hostname or ""
+        except ValueError:
+            skip("端口非法，需为 1-65535 的数字")
+            continue
+
+        scheme = (u.scheme or "").lower()
+        if scheme not in ALLOWED_SCHEMES:
+            skip(f"协议 {scheme or '空'} 不支持，可选: {', '.join(ALLOWED_SCHEMES)}")
+        elif not host:
+            skip("缺少地址")
+        elif ":" in host:
+            # IPv6 字面量：build_proxy_url() 拼回 URL 时不会补方括号，入库即产生不可用记录，
+            # 与其存坏数据不如当场拒掉（单个添加同样受此限制）
+            skip("暂不支持 IPv6 字面量地址，请用域名或 IPv4")
+        elif port is None:
+            skip("缺少端口")
+        elif not 1 <= port <= 65535:
+            # urlsplit 放行 0，但 build_proxy_url 只接受 1-65535；此处对齐后者，
+            # 否则 :0 这类行能入库却在实际取用时抛 ValueError
+            skip("端口非法，需为 1-65535 的数字")
+        elif u.path not in ("", "/") or u.query or u.fragment:
+            skip("地址后不应带路径/参数，格式应为 scheme://[user:pass@]host:port")
+        else:
+            username = unquote(u.username or "")
+            password = unquote(u.password or "")
+            if password and not username:
+                skip("有密码但缺用户名，如密码含 @ 或 : 请改用 %40 / %3A 转义")
+                continue
+            ident = (scheme, host, port, username)
+            if ident in seen:
+                skip(f"与本批第 {seen[ident]} 行重复")
+                continue
+            seen[ident] = lineno
+            out.append({
+                "line": lineno, "scheme": scheme, "host": host,
+                "port": port, "username": username, "password": password,
+            })
+    return out
+
+
 def _proxy_row_to_dict(row: dict) -> dict:
     """代理行 → 响应体：绝不返回密码密文/明文"""
     return {
@@ -479,6 +556,96 @@ async def create_proxy(req: ProxyCreateRequest, request: Request):
         f"添加代理: {name} {scheme}://{req.host}:{req.port} 认证={'有' if password else '无'}",
     )
     return {"id": proxy_id, "message": "创建成功"}
+
+
+@router.post("/proxies/bulk", tags=["管理员"])
+async def bulk_create_proxies(req: ProxyBulkCreateRequest, request: Request):
+    """批量添加代理：每行一个 scheme://[user:pass@]host:port，名称自动生成
+
+    单个添加走 POST /proxies，两条路径并存。逐行报告成功/跳过原因，跳过的行不阻断
+    其余行入库；全部有效行走一条多值 INSERT，要么全进要么全不进。
+    """
+    await require_admin(request)
+
+    items = parse_bulk_proxies(req.proxy_urls)
+    if not items:
+        raise HTTPException(status_code=400, detail="请至少粘贴一行代理（空行与 # 注释行会被忽略）")
+    todo = [it for it in items if "host" in it]
+    if len(todo) > BULK_MAX_LINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次最多 {BULK_MAX_LINES} 行，本次有效 {len(todo)} 行，请分批提交",
+        )
+
+    rows = await asyncio.to_thread(fetch_all, "SELECT name, scheme, host, port, username FROM proxies")
+    # 代理的身份信息（协议/地址/端口/用户名）都是明文列，查重一条 SELECT 即可，
+    # 不像上游密钥那样必须解密——同 IP 同端口不同账号是不同代理，故按四元组判重
+    existing = {(r["scheme"], r["host"], int(r["port"]), r.get("username") or "") for r in rows}
+    for it in items:
+        if "host" not in it:
+            continue
+        if (it["scheme"], it["host"], it["port"], it["username"]) in existing:
+            it["reason"] = "库中已存在相同代理（协议+地址+端口+用户名）"
+            it.pop("password", None)
+            it.pop("host")
+    todo = [it for it in items if "host" in it]
+
+    created = []
+    if todo:
+        master_key = ""
+        if any(it["password"] for it in todo):
+            master_key = await asyncio.to_thread(get_setting, "upstream_master_key")
+            if not master_key:
+                raise HTTPException(status_code=500, detail="主密钥未配置")
+
+        def _encrypt_all() -> list:
+            """有密码的行逐条加密；每次加密都要重跑一遍 HKDF，故整批放进线程"""
+            return [encrypt_proxy_secret(it["password"], master_key) if it["password"] else ""
+                    for it in todo]
+
+        ciphers = await asyncio.to_thread(_encrypt_all)
+        names = gen_bulk_names(req.name_prefix, [r["name"] for r in rows], len(todo))
+        remark = (req.remark or "").strip()
+        now = utcnow()
+        params = []
+        for it, name, cipher in zip(todo, names, ciphers):
+            it["id"] = str(uuid.uuid4())
+            it["name"] = name
+            it["has_auth"] = bool(cipher)
+            params.extend([
+                it["id"], name, it["scheme"], it["host"], it["port"],
+                it["username"], cipher, remark, now, now,
+            ])
+        placeholders = ", ".join(["(" + ", ".join(["%s"] * 10) + ", 'active')"] * len(todo))
+        await asyncio.to_thread(
+            execute,
+            "INSERT INTO proxies "
+            "(id, name, scheme, host, port, username, password_ciphertext, remark, "
+            "created_at, updated_at, status) VALUES " + placeholders,
+            tuple(params),
+        )
+        proxy_pool.invalidate()
+
+        await asyncio.to_thread(
+            insert_audit_many,
+            [("create", "proxy", it["id"],
+              f"批量添加代理: {it['name']} {it['scheme']}://{it['host']}:{it['port']} "
+              f"认证={'有' if it['has_auth'] else '无'}")
+             for it in todo],
+        )
+        created = [{"line": it["line"], "id": it["id"], "name": it["name"], "scheme": it["scheme"],
+                    "host": it["host"], "port": it["port"], "username": it["username"],
+                    "has_auth": it["has_auth"]}
+                   for it in todo]
+
+    skipped = [{"line": it["line"], "reason": it["reason"]} for it in items if "reason" in it]
+    return {
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "created": created,
+        "skipped": skipped,
+        "message": f"成功 {len(created)} 个，跳过 {len(skipped)} 个",
+    }
 
 
 @router.put("/proxies/{proxy_id}", tags=["管理员"])
