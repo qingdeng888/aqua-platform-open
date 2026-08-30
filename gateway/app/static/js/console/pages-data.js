@@ -1,5 +1,6 @@
 /* AQUA Gateway 管理控制台 — pages-data.js
- * 数据面页面：仪表盘(dash) / 上游密钥(keys) / 下游客户(clients) / 桶监控(buckets)
+ * 数据面页面：仪表盘(dash) / 上游密钥(keys) / 模型管理(models) / 代理池(proxies) /
+ *            下游客户(clients) / 桶监控(buckets)
  * 所有动态数据经 esc()/textContent 输出；行操作按钮走 data-act + cache 索引委托。
  */
 (function () {
@@ -390,6 +391,225 @@ GW.actions['upstream-delete'] = function (ds) {
     },
   });
 };
+
+/* ================================================================
+ *  模型管理 — GET/POST/DELETE /models,
+ *             PUT /models/visibility, PUT /models/block-setting
+ *  列表 = 上游实时全量 + 覆盖层（隐藏 / 手动补录）。搜索在前端即时过滤：
+ *  不发请求、不重建输入框（焦点与光标位置不丢）。
+ * ================================================================ */
+var mdlSearch = '';   // 搜索词跨重渲染保持
+
+GW.R.models = async function (refresh) {
+  var c = GW.$('content');
+  c.innerHTML = GW.spinner();
+  GW.headerActions(
+    '<button class="btn btn-primary btn-sm" data-act="model-add">+ 手动添加模型</button>' +
+    '<button class="btn btn-sm" data-act="model-refresh">&#128260; 回源刷新</button>'
+  );
+  try {
+    var d = await api('/models' + (refresh ? '?refresh=1' : ''));
+    var rows = d.models || [];
+    rows.forEach(function (r, i) { r._i = i; });   // 行动作按原始下标取数，过滤不影响
+    GW.cache.models = rows;
+
+    c.innerHTML = '';
+    c.appendChild(GW.statGrid([
+      { label: '上游实时模型', value: GW.fmtNum(d.upstream_count) },
+      { label: '对外可见', value: GW.fmtNum(d.visible_count) },
+      { label: '已隐藏', value: GW.fmtNum(d.hidden_count) },
+      { label: '手动补录', value: GW.fmtNum(d.manual_count) },
+    ]));
+    c.appendChild(buildBlockToggle(!!d.block_calls));
+    c.appendChild(buildModelFilterBar());
+    var wrap = document.createElement('div');
+    wrap.className = 'table-wrap card';
+    wrap.id = 'mdlTableWrap';
+    c.appendChild(wrap);
+    paintModelTable();
+    var inp = GW.$('mdlSearch');
+    inp.addEventListener('input', function () { mdlSearch = this.value; paintModelTable(); });
+  } catch (e) {
+    c.innerHTML = GW.errorCard(e.message);
+  }
+};
+
+/* 开关卡片：隐藏的模型是否同时禁止调用（关=仅列表不显示；开=调用返回 400） */
+function buildBlockToggle(on) {
+  var card = document.createElement('div');
+  card.className = 'card mb-12';
+  var head = document.createElement('div');
+  head.className = 'flex items-center justify-between';
+  var t = document.createElement('span');
+  t.className = 'card-title'; t.style.margin = '0';
+  t.textContent = '隐藏的模型同时禁止调用';
+  var sw = document.createElement('label');
+  sw.className = 'switch';
+  var cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.checked = on; cb.id = 'mdlBlockToggle';
+  var track = document.createElement('span'); track.className = 'track';
+  sw.appendChild(cb); sw.appendChild(track);
+  head.appendChild(t); head.appendChild(sw);
+  card.appendChild(head);
+  var p = document.createElement('p');
+  p.className = 'text-xs text-sec mt-8';
+  p.textContent = '关：隐藏的模型只是不在 /v1/models 列出，下游指名调用仍照旧转发。'
+    + '开：隐藏的模型被调用时返回 400 model_disabled。';
+  card.appendChild(p);
+  cb.addEventListener('change', async function () {
+    var want = this.checked;
+    this.disabled = true;
+    try {
+      var r = await api('/models/block-setting', {
+        method: 'PUT', body: JSON.stringify({ block_calls: want }),
+      });
+      GW.toast(r.message || '已保存', 'success');
+    } catch (e) {
+      this.checked = !want;      // 保存失败则回弹，避免界面与后端不一致
+      GW.toast(e.message, 'error');
+    } finally {
+      this.disabled = false;
+    }
+  });
+  return card;
+}
+
+/* 筛选栏：搜索框（即时过滤）+ 对当前筛选结果批量隐藏/显示 */
+function buildModelFilterBar() {
+  var bar = document.createElement('div');
+  bar.className = 'filter-bar';
+  bar.innerHTML =
+    '<input type="text" id="mdlSearch" placeholder="搜索模型 ID / 备注…" style="min-width:260px">' +
+    '<button class="btn btn-sm" data-act="model-bulk-hide">隐藏筛选结果</button>' +
+    '<button class="btn btn-sm" data-act="model-bulk-show">显示筛选结果</button>' +
+    '<span class="text-sm text-dim" id="mdlCount"></span>';
+  bar.querySelector('#mdlSearch').value = mdlSearch;   // 值经 .value 赋值，不进属性内插
+  return bar;
+}
+
+// 当前搜索词命中的行（模型 ID 或备注子串，不区分大小写）
+function matchedModels() {
+  var kw = (mdlSearch || '').trim().toLowerCase();
+  var rows = GW.cache.models || [];
+  if (!kw) return rows;
+  return rows.filter(function (r) {
+    return String(r.model_id).toLowerCase().indexOf(kw) !== -1 ||
+      String(r.remark || '').toLowerCase().indexOf(kw) !== -1;
+  });
+}
+
+/* 只重画表格与计数，搜索框本身不动（焦点不丢） */
+function paintModelTable() {
+  var wrap = GW.$('mdlTableWrap');
+  if (!wrap) return;
+  var list = matchedModels();
+  var cnt = GW.$('mdlCount');
+  if (cnt) cnt.textContent = '匹配 ' + list.length + ' / 共 ' + (GW.cache.models || []).length + ' 个';
+  if (!list.length) {
+    wrap.innerHTML = '';
+    var none = document.createElement('div');
+    none.className = 'text-sm text-dim';
+    none.style.padding = '12px';
+    none.textContent = '没有匹配的模型';
+    wrap.appendChild(none);
+    return;
+  }
+  var html = '<table><thead><tr><th>模型 ID</th><th>来源</th><th>状态</th><th>备注</th>' +
+    '<th>更新时间</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(function (r) {
+    html += '<tr>' +
+      '<td class="wrap-cell mono text-sm">' + esc(r.model_id) + '</td>' +
+      '<td>' + (r.manual ? badge('手动补录', 'blue') : badge('上游', 'gray')) + '</td>' +
+      '<td>' + (r.hidden ? badge('已隐藏', 'yellow') : badge('可见', 'green')) + '</td>' +
+      '<td class="wrap-cell text-sm">' + esc(r.remark || '-') + '</td>' +
+      '<td class="text-sm">' + esc(GW.fmtTime(r.updated_at)) + '</td>' +
+      '<td><div class="cell-actions">' +
+      '<button class="btn btn-sm" data-act="model-toggle" data-idx="' + r._i + '">' +
+        (r.hidden ? '显示' : '隐藏') + '</button>' +
+      (r.manual ? '<button class="btn btn-sm btn-danger" data-act="model-delete" data-idx="' +
+        r._i + '">删除</button>' : '') +
+      '</div></td></tr>';
+  });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+// 单个模型隐藏/显示（批量端点传一个 ID）
+GW.actions['model-toggle'] = async function (ds) {
+  var r = (GW.cache.models || [])[parseInt(ds.idx, 10)];
+  if (!r) return;
+  try {
+    var d = await api('/models/visibility', {
+      method: 'PUT',
+      body: JSON.stringify({ model_ids: [r.model_id], hidden: !r.hidden }),
+    });
+    GW.toast(d.message || '已保存', 'success');
+    GW.R.models();
+  } catch (e) { GW.toast(e.message, 'error'); }
+};
+
+// 对当前筛选结果批量隐藏/显示：83 个模型逐个点太慢，按搜索结果整批处理
+function bulkVisibility(hidden) {
+  var list = matchedModels().filter(function (r) { return !!r.hidden !== hidden; });
+  if (!list.length) { GW.toast(hidden ? '筛选结果均已隐藏' : '筛选结果均已可见', 'info'); return; }
+  var ids = list.map(function (r) { return r.model_id; });
+  GW.confirmModal({
+    title: hidden ? '批量隐藏模型' : '批量显示模型',
+    body: (hidden ? '将隐藏 ' : '将显示 ') + ids.length + ' 个模型（当前搜索结果）。'
+      + (hidden ? '隐藏后不再出现在 /v1/models；是否连调用一起禁掉取决于页面上方的开关。' : ''),
+    confirmText: hidden ? '确定隐藏' : '确定显示',
+    danger: hidden,
+    onConfirm: async function () {
+      var d = await api('/models/visibility', {
+        method: 'PUT', body: JSON.stringify({ model_ids: ids, hidden: hidden }),
+      });
+      GW.toast(d.message || '已保存', 'success');
+      GW.R.models();
+    },
+  });
+}
+GW.actions['model-bulk-hide'] = function () { bulkVisibility(true); };
+GW.actions['model-bulk-show'] = function () { bulkVisibility(false); };
+
+// 手动补录：上游 /models 尚未收录但确实可调用的模型
+GW.actions['model-add'] = function () {
+  GW.formModal({
+    title: '手动添加模型',
+    hint: '用于上游已上线但 /models 尚未收录的模型 ID。仅允许字母、数字与 . _ : / - 。'
+      + '若该 ID 后来出现在上游列表中，此处的补录项会自动让位给上游条目。',
+    fields: [
+      { id: 'model_id', label: '模型 ID', placeholder: 'publisher/model-name' },
+      { id: 'remark', label: '备注（可选）', placeholder: '例如：上游新上线，未进 /models' },
+    ],
+    submitText: '添加',
+    onSubmit: async function (v) {
+      if (!v.model_id) throw new Error('模型 ID 不能为空');
+      var d = await api('/models', {
+        method: 'POST', body: JSON.stringify({ model_id: v.model_id, remark: v.remark || '' }),
+      });
+      GW.toast(d.message || '添加成功', 'success');
+      GW.R.models();
+    },
+  });
+};
+
+// 删除手动补录项（上游自带模型不可删除，只能隐藏）
+GW.actions['model-delete'] = function (ds) {
+  var r = (GW.cache.models || [])[parseInt(ds.idx, 10)];
+  if (!r) return;
+  GW.confirmModal({
+    title: '删除手动补录模型',
+    body: '确定删除手动补录的模型 ' + r.model_id + ' 吗？删除后它不再出现在模型列表中。',
+    danger: true,
+    onConfirm: async function () {
+      var d = await api('/models?model_id=' + encodeURIComponent(r.model_id), { method: 'DELETE' });
+      GW.toast(d.message || '删除成功', 'success');
+      GW.R.models();
+    },
+  });
+};
+
+GW.actions['model-refresh'] = function () { GW.R.models(true); };
 
 /* ================================================================
  *  代理池 — GET/POST /proxies, POST /proxies/bulk,

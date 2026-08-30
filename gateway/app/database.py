@@ -424,6 +424,19 @@ def init_db() -> None:
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ip_monitor_anomaly ON ip_monitor(anomaly_score);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ip_monitor_last_seen ON ip_monitor(last_seen);")
+        # 模型覆盖层：对外模型列表 = 上游实时全量 ± 本表。
+        # 只有携带信息的模型才有行（hidden=1 隐藏 / manual=1 手动补录），全字段明文无需解密。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS model_overrides (
+                model_id TEXT PRIMARY KEY,
+                hidden INT DEFAULT 0,
+                manual INT DEFAULT 0,
+                remark TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_model_overrides_hidden ON model_overrides(hidden);")
         conn.commit()
 
         # 迁移：为 request_logs 添加毫秒级精准统计字段
@@ -538,6 +551,9 @@ def seed_defaults() -> None:
         "switch_threshold": "38",
         "model_mappings": "{}",
         "maintenance_mode": "false",
+        # 「隐藏的模型同时禁止调用」开关：false=仅从模型列表隐藏（下游指名调用仍放行），
+        # true=隐藏的模型被调用时返回 400 model_disabled
+        "hidden_models_block_calls": "false",
     }
     for key, value in defaults.items():
         if get_setting(key) is None:

@@ -168,6 +168,35 @@ const feClampFallback = (testSrc.match(/clampInt\(GW\.\$\('mtMaxTokens'\)\.value
 check(!!mtDefaultBudget && feInputDefault === mtDefaultBudget && feClampFallback === mtDefaultBudget,
   `max_tokens 默认值前后端一致 (后端 ${mtDefaultBudget}, 输入框 ${feInputDefault}, 回落 ${feClampFallback})`);
 
+/* 8f) 模型管理页：动作齐全 + 搜索为前端即时过滤 + 隐藏即禁用开关 */
+const mdlActs = ['model-add', 'model-delete', 'model-toggle', 'model-bulk-hide',
+  'model-bulk-show', 'model-refresh'];
+const missingMdl = mdlActs.filter((a) => !dataSrc.includes(`GW.actions['${a}']`));
+check(missingMdl.length === 0, `模型管理动作齐全 (缺失: ${missingMdl.join(', ') || '无'})`);
+check(allJs.includes("'/models/visibility'") && allJs.includes("'/models/block-setting'"),
+  '模型管理调用 PUT /models/visibility 与 PUT /models/block-setting');
+check(/id="mdlSearch"/.test(dataSrc) && /function matchedModels\(/.test(dataSrc) &&
+  /addEventListener\('input'[\s\S]{0,120}paintModelTable\(\)/.test(dataSrc),
+  '模型管理页有搜索框，且按输入即时前端过滤（不重建输入框、不发请求）');
+check(/mdlBlockToggle/.test(dataSrc) && /block_calls/.test(dataSrc),
+  '模型管理页提供「隐藏的模型同时禁止调用」开关');
+// 模型 ID 来自上游，渲染必须转义；行动作只带 data-idx
+const mdlPaint = (dataSrc.match(/function paintModelTable\([\s\S]*?\n}/) || [''])[0];
+check(mdlPaint.length > 0 && /esc\(r\.model_id\)/.test(mdlPaint) &&
+  !/\$\{/.test(mdlPaint) && !/data-act="model-[a-z-]+" data-id="/.test(mdlPaint),
+  '模型表格经 esc() 输出模型 ID，行动作只带 data-idx');
+
+/* 8g) 后端：白名单已下线，可见性与「名称有效性」分离 */
+const pubSrc = readFileSync(join(repoRoot, 'gateway', 'app', 'public_api.py'), 'utf8');
+check(!/_VERIFIED_WORKING_MODELS/.test(pubSrc),
+  'public_api 已移除硬编码白名单 _VERIFIED_WORKING_MODELS');
+check(/async def get_model_list\(/.test(pubSrc) && /apply_overrides\(raw, overrides\)/.test(pubSrc),
+  'public_api 提供 get_model_list()：上游全量 + 管理员覆盖层');
+check(/refresh_verified_models\(all_known_models\(raw, overrides\)\)/.test(pubSrc),
+  '模型ID纠错基于「真实存在」全量集合（含被隐藏项），隐藏不会导致静默改写模型');
+check(/code": "model_disabled/.test(pubSrc) && /is_call_blocked\(model\)/.test(pubSrc),
+  '开关开启时隐藏模型调用返回 400 model_disabled');
+
 /* 9) 纯网关形态：前端不得残留已下线的 platform 耦合端点 */
 const removed = ['/platform-tokens', '/system/user-stats', '/system/health'];
 const leftover = removed.filter((ep) => allJs.includes(ep));

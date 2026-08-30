@@ -38,6 +38,7 @@ from app.scheduler import get_scheduler
 from app.public_api import router as public_router
 from app.admin_api import router as admin_router, require_admin
 from app.model_test import router as model_test_router
+from app.model_registry import router as model_registry_router
 from app.admin_panel import create_admin
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -254,6 +255,7 @@ app.mount("/gw/static", StaticFiles(directory=str(STATIC_DIR)), name="gw_static"
 app.include_router(public_router)
 app.include_router(admin_router)
 app.include_router(model_test_router)
+app.include_router(model_registry_router)
 
 # 挂载 SQLAdmin 数据库管理面板
 admin_panel = create_admin(app)

@@ -255,18 +255,16 @@ def _async_update_last_used(key_id, ts):
 
 _models_cache = {"data": None, "expires": 0}
 
-# 经过实际API调用验证的可用模型集合：动态取自NIM模型目录（nim_models 仅收录实测可用模型），
-# 消除与目录的第三份硬编码拷贝导致的漂移
-# NVIDIA NIM的/v1/models端点会列出所有平台模型，但很多实际上无法通过chat/completions调用
-try:
-    from app.nim_models import NIM_MODEL_CATALOG as _NIM_CATALOG
-except ImportError:
-    _NIM_CATALOG = {}
-_VERIFIED_WORKING_MODELS = set(_NIM_CATALOG.keys())
+# 说明：不再有「已验证可用模型」白名单。上游 /models 返回什么就收什么，
+# 要不要对外可见交给管理员在控制台「模型管理」页决定（app.model_registry 覆盖层）。
+# NIM_MODEL_CATALOG 退化为纯展示元数据来源（显示名/上下文长度/能力标签），不再参与过滤。
 
 
 async def fetch_upstream_models() -> list:
-    """从上游NVIDIA获取模型列表，过滤只保留可用的对话模型（60秒缓存）"""
+    """从上游NVIDIA获取模型列表（全量，60秒缓存）
+
+    不做任何白名单过滤；对外可见列表请用 get_model_list()（叠加管理员覆盖层）。
+    """
     now_ts = time.time()
     if _models_cache["data"] and _models_cache["expires"] > now_ts:
         return _models_cache["data"]
@@ -298,68 +296,30 @@ async def fetch_upstream_models() -> list:
         if resp.status_code == 200:
             data = resp.json()
             all_models = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-            upstream_model_ids = set()
-            for m in all_models:
-                mid = m.get("id", "") if isinstance(m, dict) else str(m)
-                if mid:
-                    upstream_model_ids.add(mid)
+            models = [m for m in all_models if isinstance(m, dict) and m.get("id")]
 
-            # 过滤：只保留经过验证可用或在NIM目录中且未弃用的模型
-            try:
-                from app.nim_models import NIM_MODEL_CATALOG
-                nim_catalog = NIM_MODEL_CATALOG
-            except ImportError:
-                nim_catalog = {}
-
-            filtered_models = []
-            removed_models = []
-            for m in all_models:
-                mid = m.get("id", "") if isinstance(m, dict) else ""
-                if not mid:
-                    continue
-
-                # 检查是否在已验证可用列表
-                if mid in _VERIFIED_WORKING_MODELS:
-                    filtered_models.append(m)
-                    continue
-
-                # 检查是否在NIM目录中且未弃用
-                info = nim_catalog.get(mid)
-                if info:
-                    tags = [t.lower() for t in (info.tags or [])]
-                    if "deprecated" in tags:
-                        removed_models.append(mid)
-                        continue
-                    filtered_models.append(m)
-                    continue
-
-                # 不在任何白名单中，排除
-                removed_models.append(mid)
-
-            # 记录被移除的模型（便于排查新增的可用模型）
-            if removed_models:
-                logger.info(f"模型列表过滤: 排除{len(removed_models)}个不可用模型: {', '.join(removed_models[:20])}")
-
-            # 检查已验证列表中是否含有上游已不存在的模型
-            upstream_set = {m.get("id", "") for m in all_models if isinstance(m, dict)}
-            stale_verified = [m for m in _VERIFIED_WORKING_MODELS if m not in upstream_set]
-            if stale_verified:
-                logger.warning(f"已验证模型中以下模型上游已不存在(可能已弃用): {', '.join(stale_verified)}")
-                # 不移除，保留为后备（上游可能临时下线）
-                for m in stale_verified:
-                    # 添加回列表（作为后备）
-                    filtered_models.append({"id": m})
-
-            _models_cache["data"] = filtered_models
+            _models_cache["data"] = models
             _models_cache["expires"] = now_ts + 60  # 60秒缓存（接近实时）
-            # v9.2: 同步更新验证器缓存
-            refresh_verified_models(filtered_models)
-            logger.info(f"模型列表已更新: {len(filtered_models)}个可用模型 (排除{len(removed_models)}个)")
-            return filtered_models
+            logger.info(f"上游模型列表已更新: {len(models)} 个模型")
+            return models
     except Exception as e:
         logger.error(f"获取上游模型列表失败: {e}")
 
     return _models_cache["data"] or []
+
+
+async def get_model_list() -> list:
+    """对外模型列表 = 上游实时全量 + 管理员覆盖层（隐藏项剔除、手动补录项追加）
+
+    同时把「真实存在的全量模型」（含被隐藏项）推给模型ID纠错器：可见性与名称有效性
+    是两件事，否则隐藏一个模型会让指名调用它的请求被模糊匹配改写到相近的另一个模型上。
+    """
+    from app.model_registry import all_known_models, apply_overrides, get_overrides
+
+    raw = await fetch_upstream_models()
+    overrides = await get_overrides()
+    refresh_verified_models(all_known_models(raw, overrides))
+    return apply_overrides(raw, overrides)
 
 
 # ========== 模型列表端点 ==========
@@ -468,7 +428,7 @@ async def list_models(request: Request):
     except HTTPException:
         pass  # 未认证也允许查看模型列表
 
-    models = await fetch_upstream_models()
+    models = await get_model_list()
     enriched = _enrich_model_list(models)
     return {"object": "list", "data": enriched}
 
@@ -476,7 +436,7 @@ async def list_models(request: Request):
 @router.get("/api/public/models", tags=["公共API"])
 async def public_models():
     """公开模型列表（无需认证，5分钟缓存，含能力标签）"""
-    models = await fetch_upstream_models()
+    models = await get_model_list()
     enriched = _enrich_model_list(models)
     return {"object": "list", "data": enriched}
 
@@ -1164,24 +1124,32 @@ async def chat_completions(request: Request):
             "code": "invalid_model",
         })
 
-    # === v9.2: 检查模型是否存在（对照NIM模型目录 + 上游实时列表） ===
+    # === 模型停用检查：被管理员隐藏 且「隐藏的模型同时禁止调用」开关打开时才拦截 ===
+    from app.model_registry import is_call_blocked
+    if await is_call_blocked(model):
+        logger.info(f"模型已被管理员停用，拒绝调用: '{model}'")
+        raise HTTPException(status_code=400, detail={
+            "message": f"模型 '{model}' 已被停用，请改用其他模型（可用列表见 GET /v1/models）",
+            "type": "invalid_request_error",
+            "code": "model_disabled",
+        })
+
+    # === v9.2: 检查模型是否存在（对照上游实时全量列表 + 手动补录项） ===
     try:
-        from app.nim_models import NIM_MODEL_CATALOG
-        is_known = model in _VERIFIED_WORKING_MODELS or model in NIM_MODEL_CATALOG
-        if not is_known and _models_cache["data"]:
-            is_known = any(m.get("id") == model for m in _models_cache["data"] if isinstance(m, dict))
+        is_known = bool(_models_cache["data"]) and any(
+            m.get("id") == model for m in _models_cache["data"] if isinstance(m, dict)
+        )
         if not is_known:
-            # 尝试从上游实时获取
+            # 缓存未命中时回源一次（同时刷新模型ID纠错器的已知集合）
             try:
-                upstream_models = await fetch_upstream_models()
-                is_known = any(m.get("id") == model for m in upstream_models if isinstance(m, dict))
+                known_models = await get_model_list()
+                is_known = any(m.get("id") == model for m in known_models if isinstance(m, dict))
             except Exception:
                 pass
         if not is_known:
-            suggestion = build_model_error_suggestion(model)
             logger.warning(f"模型ID不在可用列表中: '{model}' (可能不存在于上游，已放行)")
             # 不拦截，仅记录日志 - 上游可能有新增模型
-    except ImportError:
+    except Exception:
         pass
 
     # === v9.2: 请求体格式强制校验 + 参数容错 ===

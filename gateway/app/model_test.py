@@ -190,14 +190,15 @@ async def list_test_models(request: Request, refresh: int = Query(0, ge=0, le=1)
     """实时模型列表（复用公开接口的取数与富化逻辑，refresh=1 跳过 60 秒缓存回源）"""
     await require_admin(request)
 
-    from app.public_api import _enrich_model_list, _models_cache, fetch_upstream_models
+    from app.public_api import _enrich_model_list, _models_cache, get_model_list
 
     from_cache = bool(_models_cache["data"]) and _models_cache["expires"] > time.time()
     if refresh:
         _models_cache["expires"] = 0      # 强制回源，与 /gw/admin/sync-models 同一手法
         from_cache = False
 
-    enriched = _enrich_model_list(await fetch_upstream_models())
+    # 与下游客户看到的列表一致（已剔除管理员隐藏项、含手动补录项）
+    enriched = _enrich_model_list(await get_model_list())
     models = [
         {
             "id": m.get("id", ""),

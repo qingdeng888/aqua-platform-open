@@ -45,7 +45,7 @@ from app.proxy_pool import (
     ALLOWED_MODES, ALLOWED_SCHEMES, MODE_BIND, build_proxy_url, proxy_pool,
 )
 from app.scheduler import get_scheduler, get_threshold_for_model
-from app.public_api import _VERIFIED_WORKING_MODELS, _clear_settings_cache
+from app.public_api import _clear_settings_cache
 from app.middleware import (
     is_maintenance_mode, set_maintenance_mode,
     _login_rate_limiter, _admin_rate_limiter, get_client_ip,
@@ -2782,11 +2782,12 @@ async def sync_upstream_models(request: Request):
     url = f"{base_url}{models_path}"
 
     try:
-        from app.public_api import _models_cache, fetch_upstream_models
+        from app.public_api import _models_cache, get_model_list
         # 清除缓存，强制重新获取
         _models_cache["expires"] = 0
-        models = await fetch_upstream_models()
-        return {"count": len(models), "models": [m.get("id","") for m in models[:50]], "note": "已过滤不可用/弃用模型"}
+        models = await get_model_list()
+        return {"count": len(models), "models": [m.get("id","") for m in models[:50]],
+                "note": "上游实时全量，已应用「模型管理」页的隐藏/手动补录"}
     except Exception as e:
         logger.error(f"上游模型同步失败: {e}")
         return {"error": str(e), "count": 0, "models": []}

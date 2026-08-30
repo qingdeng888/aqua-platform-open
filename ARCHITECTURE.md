@@ -498,9 +498,11 @@ AQUA Gateway 通过 **NVIDIA NIM** (NVIDIA Inference Microservices) 提供大模
 | **认证方式** | Bearer Token（上游密钥池化） |
 | **协议** | HTTPS / SSE（流式） |
 
-### 6.2 模型目录
+### 6.2 模型目录（展示元数据）
 
-Gateway 支持以下 **11+** 模型，涵盖不同参数规模与应用场景：
+`gateway/app/nim_models.py` 的 `NIM_MODEL_CATALOG` 收录以下 **11+** 模型系列的展示元数据（显示名 / 上下文长度 / 能力标签）。
+
+> **v12.1 起该目录不再充当白名单**：对外模型列表以上游 `/models` 实时全量为准，目录只在 `_enrich_model_list()` 里补充展示字段；上游返回而目录没收录的模型照常对外可见（只是缺少友好名与标签）。详见 [6.5 模型列表与覆盖层](#65-模型列表与覆盖层)。
 
 | 模型系列 | 模型名称 | 关键能力 |
 |----------|----------|----------|
@@ -557,6 +559,67 @@ Gateway (:8000)
   Kimi    Qwen  Step
   MiniMax ...
 ```
+
+### 6.5 模型列表与覆盖层
+
+对外模型列表 = **上游 `/models` 实时全量 ± 管理员覆盖层**。v12.1 之前 `public_api.py` 里有一份硬编码的 `_VERIFIED_WORKING_MODELS`（24 条）与上游结果取交集，实测把 83 个真实模型压到 23 个，且上游上新必须改代码；该白名单已删除。
+
+```
+上游 GET /models
+      │
+      ▼
+_models_cache（60s TTL，原样全量，不做任何过滤）
+      │
+      ▼
+get_model_list()  ◀── model_overrides 覆盖层（30s 快照缓存，进程内）
+      │                 hidden=1 → 从列表剔除
+      │                 manual=1 → 上游没有则追加（owned_by="manual"）
+      ├──────────────▶ _enrich_model_list() → /v1/models、/api/v1/models、/api/public/models
+      │
+      └──────────────▶ refresh_verified_models(all_known_models(raw, overrides))
+                          即「真实存在」全量集合 = 上游 ∪ 手动补录（含被隐藏项）
+```
+
+| 组件 | 位置 | 职责 |
+|------|------|------|
+| `fetch_upstream_models()` | `public_api.py` | 回源上游 `/models`，只丢弃无 `id` 的脏条目，60 秒缓存 |
+| `get_model_list()` | `public_api.py` | 唯一对外取数入口：叠加覆盖层 + 推送纠错集合 |
+| `apply_overrides()` | `model_registry.py` | 纯函数：剔除隐藏项、追加排序后的手动补录项（上游已收录则以上游条目为准） |
+| `all_known_models()` | `model_registry.py` | 纯函数：**含被隐藏项**的全量集合，喂给模型 ID 纠错 |
+| `build_admin_rows()` | `model_registry.py` | 管理视图行（来源 / 状态 / 备注 / 更新时间）+ 关键词过滤 |
+| `get_snapshot()` | `model_registry.py` | 覆盖层 + 开关的 30 秒快照；查库异常时**返回上一份快照**而非空（宁可多列几个模型，也不能因一次库抖动清空模型列表） |
+| `is_call_blocked()` | `model_registry.py` | 聊天链路判定：开关关 → 恒 `False`；开关开 → 仅拦被隐藏项 |
+
+**关键不变量：可见性 ≠ 名称有效性。** 纠错集合必须是全量集合（含被隐藏项）。若把可见列表喂给 `refresh_verified_models()`，隐藏 `X` 之后客户端指名调 `X` 会被 6 级模糊匹配"纠正"成另一个相似模型——静默换模型比直接报错危险得多。
+
+**`model_overrides` 表的不变量：只有携带信息的模型才有行。** 取消隐藏上游模型 → 直接删行；取消隐藏手动补录项 → 只清 `hidden`。因此表大小与"管理员干预过的模型数"成正比，而不是与上游模型总数成正比。
+
+**「隐藏」的两种语义**由设置 `hidden_models_block_calls` 切换（默认 `false`）：
+
+| 开关 | 列表可见性 | 下游指名调用 |
+|------|-----------|-------------|
+| `false`（默认） | 不显示 | 放行，正常转发上游 |
+| `true` | 不显示 | `400`，`code = model_disabled` |
+
+未知模型（不在全量集合里）**不拦截，仅记日志**——上游随时可能上新，拦下来就是把网关变成需要跟着上游发版的组件。
+
+**导入方向约束**：`model_registry` 从 `admin_api` 取 `require_admin`，而 `admin_api` 在模块级 import `public_api`。因此 `public_api` 对 `model_registry` 的引用**必须是函数内局部导入**，否则形成 `public_api → admin_api → model_registry → public_api` 循环。
+
+#### 数据模型
+
+```sql
+CREATE TABLE IF NOT EXISTS model_overrides (
+    model_id   TEXT PRIMARY KEY,     -- 上游模型 ID 或手动补录的 ID
+    hidden     INT DEFAULT 0,        -- 1 = 不出现在对外列表
+    manual     INT DEFAULT 0,        -- 1 = 手动补录（上游 /models 未返回）
+    remark     TEXT DEFAULT '',      -- 管理员备注，参与控制台搜索
+    created_at TEXT NOT NULL,        -- UTC Z
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_overrides_hidden ON model_overrides(hidden);
+```
+
+全字段明文，读取无需解密（与上游密钥的"解密后查重"形成对照）。建表与设置播种都在 `database.py` 的 `init_db()` / `seed_defaults()` 内幂等执行，升级无需迁移脚本。
 
 ---
 
@@ -980,6 +1043,7 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 | **商用检测** | `/gw/admin/commercial-detection`、`/commercial/*` | 检测结果、阈值/开关、白名单、封禁与解封 |
 | **慷慨网关** | `GET /gw/admin/generous/status` | 免费额度水位线、供应商状态、负载均衡分布 |
 | **模型目录** | `/gw/admin/nim/models`、`/models/status`、`/sync-models`、`/validate-models` | NIM 模型列表、状态、同步与校验 |
+| **模型管理** | `GET/POST/DELETE /gw/admin/models`、`PUT /models/visibility`、`PUT /models/block-setting` | 管理视图（搜索 / 强制回源）、手动补录、删除手动项、批量隐藏与显示、「隐藏即禁调」开关（见 [6.5](#65-模型列表与覆盖层)） |
 | **系统监控** | `/gw/admin/system/concurrency`、`/system/ip-monitor/*` | 并发汇总、IP 监控、异常与封禁列表、手动解封 |
 | **熔断/错误** | `/gw/admin/circuit-breakers`、`/error-codes`、`/error-stats`、`/active-errors` | 熔断器状态与重置、错误码字典与统计 |
 | **配置** | `/gw/admin/settings`、`/maintenance` | 系统配置读写、维护模式热切换 |
@@ -1081,7 +1145,24 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 | 状态监控 | 模型可用性实时检测 |
 | 调用量统计 | 各模型的请求量与 Token 消耗 |
 
-### 10.7 SQLAdmin 数据库管理
+### 10.7 模型管理页
+
+控制台「模型管理」页消费 `/gw/admin/models*`，是覆盖层的唯一人机入口：
+
+| 能力 | 实现要点 |
+|------|---------|
+| 搜索 | **前端本地过滤**（同时匹配模型 ID 与备注），输入即重绘；只重绘表格与计数，输入框不重建所以焦点与光标位置不丢 |
+| 隐藏 / 显示 | 单行按钮，或对**当前搜索结果**批量操作（单批上限 `VISIBILITY_MAX_IDS = 500`） |
+| 手动补录 | 校验 `^[A-Za-z0-9._:/-]+$` 且长度 ≤ 200；模型 ID 非机密，校验失败原因照实回显 |
+| 删除 | `DELETE ... WHERE model_id = %s AND manual = 1`，非手动项返回 404 `not_manual_model`（上游自带模型删了下次回源又出现，语义上只能"隐藏"） |
+| 强制回源 | `?refresh=1` 跳过 60 秒上游缓存 |
+| 开关 | 「隐藏的模型同时禁止调用」，写 `admin_settings.hidden_models_block_calls` |
+
+写路径统一形状：参数校验 → `asyncio.to_thread(_write)` → `invalidate()` 让 30 秒快照立即失效 → 审计（批量操作走 `insert_audit_many()` 一模型一行）。**单 worker 部署前提下**进程内失效即全局权威。
+
+XSS 纪律：模型 ID 来自上游，渲染全程 `esc()`；行按钮只带 `data-act` + `data-idx`，实际数据按索引从缓存读（过滤时重新打 `_i` 标记，避免过滤后索引错位）。
+
+### 10.8 SQLAdmin 数据库管理
 
 | 路径 | 功能 |
 |------|------|
@@ -1094,7 +1175,7 @@ SQLAdmin 提供：
 - 数据过滤与搜索
 - 分页浏览
 
-### 10.8 认证机制
+### 10.9 认证机制
 
 所有管理入口共用同一组管理员密码环境变量：
 

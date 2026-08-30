@@ -14,10 +14,10 @@
 
 var A = '/gw/admin';
 
-var PN = ['dash', 'keys', 'proxies', 'clients', 'buckets', 'logs', 'algo', 'monitor', 'config', 'errors', 'commercial', 'mtest'];
+var PN = ['dash', 'keys', 'models', 'proxies', 'clients', 'buckets', 'logs', 'algo', 'monitor', 'config', 'errors', 'commercial', 'mtest'];
 var PT = {
-  dash: '仪表盘', keys: '上游密钥', proxies: '代理池', clients: '下游客户', buckets: '桶监控',
-  logs: '请求日志', algo: '算法引擎', monitor: '系统监控', config: '系统配置',
+  dash: '仪表盘', keys: '上游密钥', models: '模型管理', proxies: '代理池', clients: '下游客户',
+  buckets: '桶监控', logs: '请求日志', algo: '算法引擎', monitor: '系统监控', config: '系统配置',
   errors: '错误码', commercial: '商用检测', mtest: '模型测试',
 };
 var ALGO_SUB = [
