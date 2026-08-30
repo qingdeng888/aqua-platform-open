@@ -18,7 +18,7 @@
 """
 import asyncio
 import os
-import bcrypt
+import hmac
 import time
 import uuid
 import logging
@@ -54,9 +54,30 @@ logger = logging.getLogger("acu.admin")
 
 router = APIRouter(prefix="/gw/admin")
 
-ADMIN_PASSWORD_HASH = os.environ.get("ACU_ADMIN_PASSWORD_HASH")
-if not ADMIN_PASSWORD_HASH:
-    raise RuntimeError("[FATAL] 环境变量 ACU_ADMIN_PASSWORD_HASH 未设置！")
+# 管理员密码：只有 ACU_ADMIN_PASSWORD 一种配置方式——明文写进 .env 即可，无需哈希。
+# 与 SQLAdmin 面板（admin_panel.py）读同一个变量，两个登录口行为天然一致。
+# 不做 bcrypt 哈希是刻意取舍：.env 本就明文存着库密码与加密主密钥，且已 chmod 600
+# + gitignore + dockerignore；.env 一旦泄露，攻击者拿库密码与主密钥可直接读库解密全部
+# 上游密钥，管理员密码再哈希一层的边际收益很低。附带两个好处：不必为生成哈希装 bcrypt
+# （Debian 上 pip 装包会被 PEP 668 的 externally-managed-environment 挡住），且明文
+# 不含 $，绕开 docker compose 对 env_file 里 $xxx 做变量插值把值悄悄截断的坑。
+ADMIN_PASSWORD = os.environ.get("ACU_ADMIN_PASSWORD") or ""
+if not ADMIN_PASSWORD:
+    raise RuntimeError(
+        "[FATAL] 未配置管理员密码！请在 .env 中设置 ACU_ADMIN_PASSWORD=你的密码"
+    )
+
+
+def _verify_admin_password(password: str) -> bool:
+    """恒定时间比较管理员密码。
+
+    不做 strip / 大小写归一，也不按长度提前返回，避免通过响应差异反推密码。
+    """
+    # 模块级守卫已保证配置非空，这里再挡一次空值——否则 compare_digest(b"", b"") 为真，
+    # 会退化成"空密码即可登录"（admin_panel v10.1 踩过这个坑）
+    if not ADMIN_PASSWORD:
+        return False
+    return hmac.compare_digest(password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8"))
 
 
 # ========== 请求模型 ==========
@@ -171,11 +192,8 @@ async def admin_login(req: LoginRequest, request: Request):
         })
 
 
-    # bcrypt校验（12 rounds, 单次100-300ms CPU）与DB读写均经线程池执行，避免阻塞事件循环
-    password_ok = await asyncio.to_thread(
-        bcrypt.checkpw, req.password.encode("utf-8"), ADMIN_PASSWORD_HASH.encode("utf-8")
-    )
-    if not password_ok:
+    # 恒定时间比较为微秒级，直接同步执行（无需 to_thread，不会阻塞事件循环）
+    if not _verify_admin_password(req.password):
         raise HTTPException(status_code=401, detail={
             "message": "密码错误", "type": "unauthorized", "code": "wrong_password"
         })

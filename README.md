@@ -48,7 +48,8 @@ v12.1 为纯中转网关补上**出网通道治理**：上游密钥不再只能�
 | **模型测试** | 新增「模型测试」页（11 → 12 页）与 `/gw/admin/model-test/*`：实时模型列表 + 搜索/全选 + 并发批量探测，可选「直连 NVIDIA 上游」或「走本网关中转」两条通道 |
 | **容器化** | 新增 `Dockerfile`（多阶段、非 root、内建健康检查）+ `docker-compose.yml`（网关 + PostgreSQL 17，默认拉 CI 预构建镜像）+ `docker-compose.local.yml`（本机源码构建覆盖层）+ `.dockerignore`，`docker compose pull && docker compose up -d` 起全栈 |
 | **CI/CD** | 新增 `.github/workflows/docker-image.yml`：推送即跑「后端单测 + 前端静态检查」，全绿才构建镜像并推送到 GHCR，无需配置任何 Secret；`latest` 恒为 `amd64` + `arm64` 双架构 |
-| **工程化** | 测试基线 105 个后端单测 + 28 项前端静态检查；新增依赖 `httpx[socks]` |
+| **管理员密码** | 收敛为**单一明文变量** `ACU_ADMIN_PASSWORD`：删除 bcrypt 哈希方案与 `bcrypt` 依赖，配置即 `.env` 写一行，不必装包也不必手搓哈希 |
+| **工程化** | 测试基线 121 个后端单测 + 28 项前端静态检查；新增依赖 `httpx[socks]`，移除 `bcrypt` |
 
 ---
 
@@ -80,7 +81,7 @@ v12.0 将项目**收敛为纯中转网关**（类似 CLI proxy API 形态）：�
 | **模型连通性测试** | 控制台批量探测：实时模型列表、模型搜索/全选、可自定义提示词，支持「直连上游」与「走本网关中转」双通道对照 |
 | **管理控制台** | 零构建网关控制台（12 页面）+ SQLAdmin 数据库面板 |
 | **多级缓存** | L1/L2 两级进程内内存缓存（LRU + TTL）：API Key 缓存、限流计数、TPM/RPM 追踪 |
-| **安全体系** | bcrypt(12) 管理密码、SHA-256 密钥哈希查库、IP 监控、可信代理模型、请求体 10MB 硬限 |
+| **安全体系** | 管理密码恒定时间比较、SHA-256 密钥哈希查库、IP 监控、可信代理模型、请求体 10MB 硬限 |
 
 **如实声明**：多协议转换（Anthropic/Gemini）当前为**内置转换器、实验性、未接入主链路**（详见[多协议转换](#多协议转换实验性)）；分布式缓存（Redis）未引入；仅支持 PostgreSQL；无用户注册体系（密钥由管理员在控制台发放）。
 
@@ -154,7 +155,7 @@ CREATE DATABASE aqua_gateway OWNER aqua;
 
 | 变量 | 说明 |
 |------|------|
-| `ACU_ADMIN_PASSWORD_HASH` | 管理员密码 bcrypt 哈希（Admin API 必需，缺失则启动报错） |
+| `ACU_ADMIN_PASSWORD` | 管理员密码，**直接写明文**，无需哈希，见[管理员密码](#管理员密码) |
 | `PG_PASSWORD` | Gateway 数据库密码（缺失则启动报错） |
 
 ### 5. 启动
@@ -176,7 +177,7 @@ cd gateway && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 不想装 Python/PostgreSQL 的话，用 Compose 起「网关 + PostgreSQL 17」两个容器即可（跳过上面第 1～3、5 步，只需准备 `.env`）：
 
 ```bash
-cp .env.example .env       # 至少填 ACU_ADMIN_PASSWORD_HASH 与 PG_PASSWORD
+cp .env.example .env       # 至少填 ACU_ADMIN_PASSWORD 与 PG_PASSWORD
 docker compose pull        # 拉 CI 预构建镜像（GHCR），不在本机编译
 docker compose up -d
 docker compose logs -f gateway
@@ -190,13 +191,13 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 
 默认映射到 `http://127.0.0.1:8000`（宿主地址与端口由 `.env` 的 `GW_BIND`/`GW_PORT` 控制），建库、建表与迁移在容器首次启动时自动完成。运维细节见[Docker Compose 部署](#docker-compose-部署)。
 
-> ⚠️ **bcrypt 哈希必须用单引号包裹**：`ACU_ADMIN_PASSWORD_HASH='$2b$12$...'`。哈希含 `$`，docker compose 会对 `env_file` 里的 `$xxx` 做变量插值，不加引号会把哈希悄悄截断，表现为密码怎么都登不上。
+> 💡 **管理员密码就是一个明文变量**：`.env` 里写 `ACU_ADMIN_PASSWORD=你的密码` 即可，不需要生成哈希、不需要装依赖。详见[管理员密码](#管理员密码)。
 
 ---
 
 ## 环境变量
 
-完整模板见 [`.env.example`](.env.example)（含随机值生成命令）。**应用读取 14 项**，另有 **6 项仅供 `docker-compose.yml` 使用**（应用本身不读）。
+完整模板见 [`.env.example`](.env.example)（含随机值生成命令）。**应用读取 13 项**，另有 **6 项仅供 `docker-compose.yml` 使用**（应用本身不读）。
 
 加载与优先级：
 
@@ -208,27 +209,27 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 
 | 变量 | 校验时机 | 缺失表现 |
 |------|------|------|
-| `ACU_ADMIN_PASSWORD_HASH` | 导入 `admin_api.py` 时 | 直接 `RuntimeError: [FATAL] 环境变量 ACU_ADMIN_PASSWORD_HASH 未设置！`，进程起不来 |
+| `ACU_ADMIN_PASSWORD` | 导入 `admin_api.py` 时 | `RuntimeError: [FATAL] 未配置管理员密码！请在 .env 中设置 ACU_ADMIN_PASSWORD=你的密码`，进程起不来 |
 | `PG_PASSWORD` | 首次建连接池时（惰性，导入不失败） | `RuntimeError: [FATAL] 环境变量 PG_PASSWORD 未设置！` |
 
 ### 认证与会话
 
-| 变量 | 默认 | 取值 | 说明 |
-|------|------|------|------|
-| `ACU_ADMIN_PASSWORD_HASH` | — | bcrypt 哈希（推荐 12 rounds，形如 `$2b$12$...`） | 管理员密码。`/gw/admin/*`（控制台）**只认这一项**；SQLAdmin 面板也优先用它。哈希格式非法（盐/长度不符）按配置错误处理，一律拒绝登录。⚠️ Docker 下必须用单引号包裹，见下方说明 |
-| `ACU_ADMIN_PASSWORD` | — | 明文密码 | **仅** SQLAdmin 面板（`/gw/dbadmin`）在 `HASH` 未配置时的回退（恒定时间比较）；对 Admin API 无效。两项都为空时面板启动即打 `[FATAL]` 并禁用一切登录 |
-| `ADMIN_SESSION_SECRET` | 随机 `token_hex(32)` | 随机串（建议 ≥ 32 字节） | SQLAdmin 面板 Session 签名密钥。未配置时每次启动生成临时值并打 warning，**重启后所有面板登录会话失效** |
+#### 管理员密码
 
-生成方式：
+只有一种配法：明文写进 `.env`，无需生成哈希、无需装任何依赖。控制台 `/admin` 与 SQLAdmin 面板 `/gw/dbadmin` 读同一个变量，行为天然一致。
+
+| 变量 | 取值 | 说明 |
+|------|------|------|
+| `ACU_ADMIN_PASSWORD` | 明文密码 | 校验走 `hmac.compare_digest` 恒定时间比较，不做 `strip`/大小写归一——配置里写什么就必须一字不差地输入什么。含 `$` 也没问题。留空则启动失败；空值也不会退化成"空密码可登录"（`compare_digest(b"", b"")` 为真，代码里额外挡了一次） |
+| `ADMIN_SESSION_SECRET` | 随机串（建议 ≥ 32 字节） | SQLAdmin 面板 Session 签名密钥。未配置时每次启动生成临时值并打 warning，**重启后所有面板登录会话失效** |
+
+**为什么不哈希**：`.env` 本就明文存着库密码（`PG_PASSWORD`）与加密主密钥（`ENCRYPTION_KEY`），且已 `chmod 600` + `gitignore` + `dockerignore`；`.env` 一旦泄露，攻击者拿库密码与主密钥可直接读库解密全部上游密钥，管理员密码再哈希一层的边际收益很低。防护重点应放在**文件权限**与**管理入口的网络隔离**（IP 白名单 / HTTPS / 不对公网暴露 `/admin`）上，而不是口令的存储形式。
 
 ```bash
-# bcrypt 哈希（12 rounds）
-python3 -c "import bcrypt; print(bcrypt.hashpw('你的密码'.encode(), bcrypt.gensalt(rounds=12)).decode())"
 # 随机会话密钥
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-> ⚠️ **`ACU_ADMIN_PASSWORD_HASH` 在 Docker 下必须写成 `ACU_ADMIN_PASSWORD_HASH='$2b$12$...'`**（单引号）。哈希含 `$`，docker compose 会对 `env_file` 里的 `$xxx` 做变量插值，不加引号会把哈希**静默截断**（实测 `$2b$12$bdJq…` → `$2b$12.yz…`），现象是配置看着没错但管理员怎么都登不上。`python-dotenv` 会自动剥掉引号，裸机部署写单引号同样正确。
 
 ### 数据库
 
@@ -326,7 +327,7 @@ print(resp.choices[0].message.content)
 | 网关控制台 | `http://127.0.0.1:8000/admin` | 管理员密码登录（HMAC Token，24h） |
 | SQLAdmin 面板 | `http://127.0.0.1:8000/gw/dbadmin` | 同一密码（Session） |
 
-**密码契约**：优先校验 `ACU_ADMIN_PASSWORD_HASH`（bcrypt），未配置时回退 `ACU_ADMIN_PASSWORD`（恒定时间比较）；**两者均未配置时一切登录被拒绝**（杜绝空密码）。
+**密码契约**（两个登录口读同一个变量 `ACU_ADMIN_PASSWORD`，见[管理员密码](#管理员密码)）：`hmac.compare_digest` 恒定时间比较明文，不做 `strip`/大小写归一。两条兜底：**未配置时控制台模块导入即抛 `RuntimeError` 进程起不来**（面板则记 `[FATAL]` 并禁用全部登录）；即便配置为空串也会先挡一次再比较——`compare_digest(b"", b"")` 为真，不挡就是"空密码即可登录"（v10.1 踩过）。
 
 控制台 12 个页面：仪表盘、上游密钥（含明文 reveal）、代理池、下游客户、桶监控、请求日志、算法引擎（17 算法实时状态）、系统监控、系统配置、错误码、商用检测、模型测试。
 
@@ -416,7 +417,7 @@ print(resp.choices[0].message.content)
 
 - **密钥安全**：上游密钥 Fernet+HKDF 加密存储（salt `acu-upstream-key-derivation`）；下游客户端密钥仅存 SHA-256 哈希（查库认证）+ Fernet 密文（salt `acu-client-key-derivation`，发放时一次性返回明文）；代理密码 Fernet 密文（salt `acu-proxy-credential-derivation`，永不回显）；列表接口不回显密文与哈希
 - **派生隔离**：上游 / 下游 / 代理凭据三条 HKDF 派生路径互不通解（有专门单测守卫）
-- **认证**：管理密码 bcrypt(12)；管理 Token 为 HMAC-SHA256 签名 + 24h 过期 + `role=admin` 校验
+- **认证**：管理密码 `hmac.compare_digest` 恒定时间比较；管理 Token 为 HMAC-SHA256 签名 + 24h 过期 + `role=admin` 校验
 - **防滥用**：管理登录 10 次/分钟/IP、其他管理接口 60 次/分钟/IP；上游 429/5xx 熔断与自适应冷却
 - **网络层**：可信代理模型（公网直连忽略一切伪造头，私网对端才信任 CF/XFF）；CORS 白名单；请求体 10MB 硬限（含 chunked 编码）
 - **Web 安全**：控制台零内联事件 / 零内联脚本，全量 `esc()` 转义（敏感值不进内联属性），由静态检查强制
@@ -605,7 +606,7 @@ WantedBy=multi-user.target
 ### 上线检查清单
 
 - [ ] `.env` 全部密钥为随机强值；`.env` 权限 600
-- [ ] `ACU_ADMIN_PASSWORD_HASH` 已配置（勿只留明文变量）；Docker 部署时该值用单引号包裹
+- [ ] `ACU_ADMIN_PASSWORD` 已配置且为强口令；`.env` 权限 600、管理入口不对公网裸奔
 - [ ] `ADMIN_SESSION_SECRET` 已配置（否则重启后面板会话失效）
 - [ ] HTTPS 已启用；管理入口有 IP 白名单或额外防护
 - [ ] 反代场景 `AQUA_TRUST_PROXY_HEADERS=1`；直连场景保持 0
@@ -628,6 +629,7 @@ WantedBy=multi-user.target
 | 查看日志 | 裸机看 systemd journal；Docker `docker compose logs -f --tail=200 gateway`（json-file 已限 10m×3） |
 | 进库操作 | Docker `docker compose exec db psql -U aqua -d aqua_gateway`；备份恢复见[Docker Compose 部署](#docker-compose-部署) |
 | 版本升级 | 裸机：拉代码 + 重启服务；Docker：`docker compose pull && docker compose up -d`（本机构建版加两个 `-f` 并带 `--build`）。两者的建表与迁移都在启动 lifespan 内幂等执行 |
+| 改管理员密码 | 改 `.env` 的 `ACU_ADMIN_PASSWORD` 后重启（`docker compose restart gateway` / `systemctl restart aqua-gateway`）。密码不入库、无需迁移。注意**已签发的 24h 管理 Token 不会失效**——Token 由库内 `admin_settings.gateway_secret` 签名，与密码无关；密码疑似泄露时需一并轮换该密钥（`docker compose exec db psql -U aqua -d aqua_gateway -c "DELETE FROM admin_settings WHERE key='gateway_secret'"` 后重启，启动时会重新随机生成，全部旧 Token 立即作废） |
 | 改配置生效 | `.env` 改动需重启进程/容器（`docker compose restart gateway`）；控制台「系统配置」项为热生效，无需重启 |
 
 ---
@@ -635,7 +637,7 @@ WantedBy=multi-user.target
 ## 开发与测试
 
 ```bash
-# 后端单元测试（105 个：安全体系 / 时间戳契约 / 代理池 / 统一异常 / 模型测试）
+# 后端单元测试（121 个：安全体系 / 管理员密码 / 时间戳契约 / 代理池 / 统一异常 / 模型测试）
 python3 -m venv .venv
 .venv/bin/pip install -r gateway/requirements.txt pytest pytest-asyncio
 .venv/bin/python -m pytest tests/ -v
@@ -673,7 +675,7 @@ aqua-platform-open/
 │   │   ├── platforms/        # 上游适配器 nvidia/openai（实验性）
 │   │   └── static/           # 控制台 UI（console.html + 4 个 JS 模块）
 │   └── requirements.txt
-├── tests/                    # pytest ×105 + 前端静态检查 ×28
+├── tests/                    # pytest ×121 + 前端静态检查 ×28
 ├── docs/rules/               # 并发与限流规则文档
 ├── .github/workflows/        # CI：docker-image.yml（测试通过才构建并推送 GHCR 镜像）
 ├── conftest.py               # 统一 sys.path
@@ -698,7 +700,7 @@ aqua-platform-open/
 - **安全**：代理密码用第三条 HKDF 派生路径（salt `acu-proxy-credential-derivation`）加密，接口只返回 `has_auth`，SQLAdmin 表单与详情排除密文列
 - **可靠性**：三条密钥探活路径与 `/upstreams/health-check` 改走密钥自身出网通道，修复代理专用密钥被直连探活误判停用的问题
 - **性能**：出网解析走 5 秒 TTL 快照 + 管理端主动失效，热路径零 DB 查询；客户端按 `(代理URL, 流式)` 复用，快照刷新时回收失效客户端
-- **依赖**：`httpx>=0.28.0` → `httpx[socks]>=0.28.0`
+- **依赖**：`httpx>=0.28.0` → `httpx[socks]>=0.28.0`；移除 `bcrypt>=4.0.0`（唯一用途是管理员密码哈希，下游客户密钥用的是 SHA-256）
 - **模型测试**：新增控制台「模型测试」页（11 → 12 页）与独立后端模块 `gateway/app/model_test.py`（`/gw/admin/model-test/models|probe|selftest-key|selftest-key/rotate`，均需管理员 Token）。实时模型列表 + 搜索 / 全选 / 自定义提示词（默认 `你是什么模型，你可以帮我干什么事情`），双通道对照：「直连 NVIDIA 上游」由后端持上游密钥走该密钥自身出网通道代请求，「走本网关中转」由浏览器持内置自测密钥打 `/v1/chat/completions` 走完整链路并落日志；批量编排在前端（并发池 1–16 + `AbortController` 中止 + 逐行就地更新 + 切页自动收手），后端只提供单模型探测
 - **内置自测密钥**：归属专用客户 `__console_selftest__` 的随机 `sk-` 密钥（部署内固定复用，可轮换，轮换即失效调度器客户端密钥缓存）；明文只下发给管理员、前端仅存闭包不落 localStorage；密钥下发/轮换写审计，批量探测不逐条写审计（避免刷爆 `audit_logs`）；探测响应只回 `key_masked` 与 `egress: direct|proxy`，代理 URL 内嵌凭据绝不外发
 - **默认输出预算**：探测 `max_tokens` 默认 256（上限 512）——联调发现推理模型在 64 预算下 `content` 为 `null` 只给 `reasoning_content`，回复提取按 `content` → `reasoning_content` → `text` 回落，前后端同语义
@@ -709,8 +711,9 @@ aqua-platform-open/
 - **容器化**：新增 `Dockerfile`（`python:3.13-slim` 多阶段构建、非 root uid 10001、`/healthz` 内建 HEALTHCHECK、CMD 不带 `--workers`）、`docker-compose.yml`（`gateway` + `postgres:17-alpine`，`depends_on: service_healthy`、命名卷 `pgdata`、日志轮转、`host.docker.internal` 映射）与 `.dockerignore`（`.env`/密钥/`.git`/`.venv` 不进镜像层）；`.env.example` 新增 Docker 小节（`GW_BIND`/`GW_PORT`/`TZ`）
 - **CI 自动构建镜像**：新增 `.github/workflows/docker-image.yml`——推送任意分支 / 打 `v*.*.*` 标签 / 向 `main` 提 PR / 手动触发时，先跑「后端单测 + 前端静态检查」两个 job，全绿才构建镜像并推送到 GHCR（`ghcr.io/<owner>/<repo>`，由 `github.repository` 推导，fork 无需改配置）。用内置 `GITHUB_TOKEN` 登录，**零 Secret 配置**；标签含分支名 / 语义版本 / `sha-<短哈希>` / `latest`；`type=gha` 层缓存；**凡是会更新 `latest` 的构建（`main` 推送与 `v*` 标签）恒为 `linux/amd64` + `linux/arm64` 双架构**，功能分支与 PR 只构 `amd64`（QEMU 约慢 3 倍）；构建后自动 `imagetools inspect` 校验 `latest` 双架构，缺一即红灯；PR 只验证构建不推送；`provenance: false` 避免包页面出现 `unknown/unknown`
 - **预构建镜像 + local 覆盖层**：`docker-compose.yml` 的 `gateway` 改为消费预构建镜像 `${GW_IMAGE:-ghcr.io/qingdeng888/aqua-platform-open}:${GW_IMAGE_TAG:-latest}`（移除 `build` 段），部署与升级变为 `docker compose pull && docker compose up -d`；新增 `docker-compose.local.yml` 覆盖层（`build` + `image: aqua-gateway:local` + `pull_policy: build`）供本机源码构建，只重定义 `gateway`，`db`/网络/数据卷全部继承，两种方式共用同一 `pgdata` 卷可无损来回切换；`.env.example` 新增 `GW_IMAGE`/`GW_IMAGE_TAG` 两项
-- **文档（Docker 踩坑）**：bcrypt 哈希含 `$`，docker compose 会对 `env_file` 中的 `$xxx` 做变量插值，`ACU_ADMIN_PASSWORD_HASH` 不加单引号会被静默截断（`$2b$12$bdJq…` → `$2b$12.yz…`），表现为配置无误却怎么都登不上；`.env.example`、README 快速开始与上线清单均已标注单引号写法
-- **测试**：后端 105 passed（代理 URL/客户端/选路 21 个 + 代理凭据加密与三路派生隔离用例；新增 `utc_from_ts` 格式/取值 3 个 + 写库路径不得回退到本地时区写入的守卫 2 个；新增模型测试 45 个：提示词归一 / `max_tokens` 收敛 / 回复与错误提取三态 / 路由与常量契约 / `extra="forbid"` / 不外泄凭据的源码守卫）；前端静态检查 28 项（代理池动作与出网徽标守卫；新增 `fmtTime` 本地化渲染与详情页无裸时间戳守卫；新增模型测试页动作齐全、自测密钥不落盘、可中止、`innerHTML` 只写静态模板、`max_tokens` 默认值前后端一致守卫）
+- **管理员密码收敛为单一明文变量**：删除 bcrypt 哈希方案（`ACU_ADMIN_PASSWORD_HASH` 变量、`bcrypt.checkpw` 分支、`bcrypt>=4.0.0` 依赖一并移除），只保留 `ACU_ADMIN_PASSWORD` 明文 + `hmac.compare_digest` 恒定时间比较。动因：两套并存带来的复杂度远大于收益——`.env` 本就明文存着库密码与加密主密钥，哈希再包一层的边际收益很低，而"先装 bcrypt 再手搓哈希"在 Debian 上会被 PEP 668 的 `externally-managed-environment` 挡住，且哈希含 `$` 会被 docker compose 对 `env_file` 做变量插值静默截断（`$2b$12$bdJq…` → `$2b$12.yz…`），表现为配置无误却怎么都登不上。顺带修掉两个登录口的行为分叉：此前 `admin_api.py` 只认哈希、`admin_panel.py` 两者都认，只配明文时面板能进而控制台直接启动失败；现在两者读同一变量。校验逻辑收进 `_verify_admin_password()`，空值先挡再比较（`compare_digest(b"", b"")` 为真），登录端点去掉 `to_thread`（恒定时间比较为微秒级，无需线程池）
+- **文档（Docker 踩坑）**：`env_file` 里的值含未加引号的 `$xxx` 会被 docker compose 当变量插值静默替换/截断——管理员密码若含 `$` 请用单引号包裹；`.env.example` 已标注
+- **测试**：后端 121 passed（代理 URL/客户端/选路 21 个 + 代理凭据加密与三路派生隔离用例；新增 `utc_from_ts` 格式/取值 3 个 + 写库路径不得回退到本地时区写入的守卫 2 个；新增模型测试 45 个：提示词归一 / `max_tokens` 收敛 / 回复与错误提取三态 / 路由与常量契约 / `extra="forbid"` / 不外泄凭据的源码守卫；新增管理员密码 16 个：明文校验（含非 ASCII 与含 `$` 口令）/ 不做 strip 与大小写归一 / 空配置拒绝一切登录 / `[FATAL]` 文案须点名变量名 / 登录端点必须走统一校验函数 / 两个登录口与 requirements 不得残留哈希方案）；前端静态检查 28 项（代理池动作与出网徽标守卫；新增 `fmtTime` 本地化渲染与详情页无裸时间戳守卫；新增模型测试页动作齐全、自测密钥不落盘、可中止、`innerHTML` 只写静态模板、`max_tokens` 默认值前后端一致守卫）
 
 ### v12.0.0（2026-08-29）
 

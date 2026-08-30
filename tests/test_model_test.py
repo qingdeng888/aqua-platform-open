@@ -17,13 +17,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-# 导入链上两处模块级强校验：database 要 PG_PASSWORD、admin_api 要管理员密码哈希。
+# 导入链上两处模块级强校验：database 要 PG_PASSWORD、admin_api 要管理员密码。
 # 单测不连库不登录，仅提供占位值满足导入。
 os.environ.setdefault("PG_PASSWORD", "unit-test-no-connection")
-os.environ.setdefault(
-    "ACU_ADMIN_PASSWORD_HASH",
-    "$2b$12$abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTU",
-)
+os.environ.setdefault("ACU_ADMIN_PASSWORD", "unit-test-placeholder")
 
 from app.model_test import (  # noqa: E402
     DEFAULT_MAX_TOKENS,

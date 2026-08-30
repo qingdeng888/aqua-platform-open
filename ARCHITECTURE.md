@@ -75,7 +75,6 @@ v12.0 起项目收敛为**单服务**形态（原 `platform/` 用户平台模块
 | **HTTP Client** | httpx[socks] | >= 0.28.0 | 异步连接池，替代 requests；`[socks]` 提供代理池 SOCKS5 支持 |
 | **Encryption** | cryptography | >= 43.0.0 | Fernet 对称加密 + HKDF 密钥派生 |
 | **Retry** | tenacity | >= 8.2.0 | 指数退避重试策略，提升请求可靠性 |
-| **Password Hash** | bcrypt | >= 4.0.0 | 管理员密码哈希，12 rounds |
 | **Session 签名** | itsdangerous | >= 2.1.0 | SQLAdmin 面板 Session 中间件 |
 | **PDF 解析** | pypdf | >= 4.0.0 | PDF 文档文本与表格提取 |
 | **DOCX 解析** | python-docx | >= 1.1.0 | Word 文档内容解析 |
@@ -104,8 +103,8 @@ v12.0 起项目收敛为**单服务**形态（原 `platform/` 用户平台模块
 │  └────┬─────────────┘  └────────┬────────┘  └─────────────┘  │
 │       │                       │                                │
 │  ┌────┴───────────────────────┴──────────────────────────┐    │
-│  │    cryptography (加密) + hmac/hashlib + bcrypt        │    │
-│  │    Fernet + HKDF-SHA256   HMAC-SHA256   12 rounds     │    │
+│  │    cryptography (加密) + hmac / hashlib               │    │
+│  │    Fernet + HKDF-SHA256   HMAC-SHA256 / SHA-256       │    │
 │  └────┬──────────────────────────────────────────────────┘    │
 │       │                                                        │
 │  ┌────┴────────────────────────────────────────────────────┐  │
@@ -265,7 +264,7 @@ v12.0 起项目收敛为**单服务**形态（原 `platform/` 用户平台模块
 │  /gw/dbadmin （SQLAdmin：数据库表 CRUD）                       │
 └───────────────────────────┴──────────────────────────────────┘
                             │
-        └── 统一认证 ACU_ADMIN_PASSWORD_HASH / ACU_ADMIN_PASSWORD ──┘
+        └────────── 统一认证 ACU_ADMIN_PASSWORD ──────────────────┘
 ```
 
 ---
@@ -807,7 +806,7 @@ PDF/DOCX/HTML 表格
 │                         │    HMAC-SHA256 (24h有效期)               │
 │  下游客户端密钥:          │                                         │
 │    Fernet(HKDF-SHA256)  │  管理员密码:                             │
-│    salt=acu-client-     │    bcrypt (12 rounds)                   │
+│    salt=acu-client-     │    明文恒定时间比较                       │
 │         key-derivation  │                                         │
 │                         │  SQLAdmin Session:                      │
 │                         │    itsdangerous 签名 cookie              │
@@ -869,7 +868,7 @@ generate_client_key() → "sk-xxxx..."（明文仅在签发响应中返回一次
 | **校验** | 签名比对（`hmac.compare_digest`）→ `exp` 未过期 → `role == "admin"`，任一不满足返回 `None` |
 
 ```
-管理员密码 (bcrypt 校验)
+管理员密码 (恒定时间比较)
        │
        ▼
   create_admin_token(secret)
@@ -893,7 +892,7 @@ generate_client_key() → "sk-xxxx..."（明文仅在签发响应中返回一次
 |------|------|--------|------|
 | **下游 API 密钥** | SHA-256 哈希查库 | 长期（可吊销） | `/v1/*` 客户端认证 |
 | **Admin Token** | HMAC-SHA256 | 24 小时 | 控制台与 `/gw/admin/*` 认证 |
-| **管理员密码** | bcrypt (12 rounds) | 由环境变量决定 | 换取 Admin Token / SQLAdmin 登录 |
+| **管理员密码** | `hmac.compare_digest` 恒定时间比较 | 由环境变量决定 | 换取 Admin Token / SQLAdmin 登录 |
 | **SQLAdmin Session** | itsdangerous 签名 cookie | 进程内有效 | `/gw/dbadmin` 面板会话 |
 
 ### 9.5 网络安全
@@ -951,7 +950,6 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 - ✅ 上游/下游/代理凭据三条 HKDF 派生路径隔离，互不通解（单测守卫）
 - ✅ CORS 白名单替代通配符
 - ✅ IP 限流防暴力破解
-- ✅ bcrypt 12 rounds 慢哈希防彩虹表
 - ✅ Admin Token 恒定时间签名比对（`hmac.compare_digest`）+ 24h 过期 + 角色校验
 - ✅ Fernet + HKDF 工业级对称加密
 - ✅ 6 维度商用检测防止免费资源滥用
@@ -1097,14 +1095,14 @@ SQLAdmin 提供：
 所有管理入口共用同一组管理员密码环境变量：
 
 ```
-ACU_ADMIN_PASSWORD_HASH (bcrypt 哈希，优先) / ACU_ADMIN_PASSWORD (明文回退，恒定时间比较)
+ACU_ADMIN_PASSWORD (明文，hmac.compare_digest 恒定时间比较)
         │
-        ├──► Admin API /gw/admin/login（要求必须配置 HASH）→ Admin Token (HMAC-SHA256, 24h)
+        ├──► Admin API /gw/admin/login → Admin Token (HMAC-SHA256, 24h)
         │       └─► 控制台 /admin/console 与全部 /gw/admin/* 端点
-        └──► SQLAdmin /gw/dbadmin  同一密码认证（未配置 HASH 时回退校验明文变量）
+        └──► SQLAdmin /gw/dbadmin  同一变量认证
 ```
 
-**两者均未配置时一切登录被拒绝**（杜绝空密码）。
+**未配置时一切登录被拒绝**：`admin_api.py` 模块导入即抛 `RuntimeError` 让进程起不来，SQLAdmin 侧记 `[FATAL]` 并禁用全部登录。配置为空串时校验函数也会先挡一次——`hmac.compare_digest(b"", b"")` 为真，不挡就等于空密码可登录（v10.1 踩过）。
 
 ---
 
@@ -1114,8 +1112,7 @@ ACU_ADMIN_PASSWORD_HASH (bcrypt 哈希，优先) / ACU_ADMIN_PASSWORD (明文回
 
 | 变量名 | 必填 | 说明 | 示例 |
 |--------|------|------|------|
-| `ACU_ADMIN_PASSWORD_HASH` | ✅ | 管理员密码 bcrypt 哈希（优先；Admin API 必需，缺失即启动报错） | `bcrypt-hash-of-password` |
-| `ACU_ADMIN_PASSWORD` | 回退 | 管理员密码明文（未配置 HASH 时 SQLAdmin 恒定时间比较回退） | `your-strong-password` |
+| `ACU_ADMIN_PASSWORD` | ✅ | 管理员密码明文（控制台与 SQLAdmin 面板共用；缺失即启动报错） | `your-strong-password` |
 | `PG_PASSWORD` | ✅ | PostgreSQL 密码（缺失时启动即报错） | `db-password` |
 | `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` | ❌ | 数据库连接参数（默认 `localhost:5432/aqua_gateway/aqua`） | `localhost` / `5432` |
 | `ADMIN_SESSION_SECRET` | 建议 | SQLAdmin 面板 Session 签名密钥（缺失用临时随机值，重启失效） | `random-secret` |

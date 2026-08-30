@@ -12,7 +12,6 @@ from sqladmin import Admin, ModelView
 from sqladmin.authentication import AuthenticationBackend
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
-import bcrypt
 
 from app.db_async import async_engine
 from app.models import (
@@ -32,10 +31,10 @@ from app.models import (
 # ========== 认证后端 ==========
 
 class AdminAuth(AuthenticationBackend):
-    """SQLAdmin 认证：优先 ACU_ADMIN_PASSWORD_HASH（bcrypt），否则 ACU_ADMIN_PASSWORD（恒定时间比较）
+    """SQLAdmin 认证：ACU_ADMIN_PASSWORD 明文恒定时间比较（与控制台 admin_api.py 同一变量）
 
     v10.1修复：此前空密码可命中未配置的空环境变量（"" == ""）导致空密码登录；
-    现两者均未配置时拒绝一切登录（面板禁用，见 create_admin 的 [FATAL] 日志）。
+    现未配置时拒绝一切登录（面板禁用，见 create_admin 的 [FATAL] 日志）。
     """
 
     async def login(self, request: Request) -> bool:
@@ -44,24 +43,13 @@ class AdminAuth(AuthenticationBackend):
         password = form.get("password", "")
         if not isinstance(password, str):
             password = ""
-        pw_hash = os.environ.get("ACU_ADMIN_PASSWORD_HASH", "").strip()
         pw_plain = os.environ.get("ACU_ADMIN_PASSWORD", "")
-        if pw_hash:
-            try:
-                # bcrypt校验（12 rounds, 单次100-300ms CPU）经线程池执行，避免阻塞事件循环
-                import asyncio
-                if await asyncio.to_thread(bcrypt.checkpw, password.encode("utf-8"), pw_hash.encode("utf-8")):
-                    request.session.update({"authenticated": True})
-                    return True
-            except (ValueError, TypeError):
-                # 哈希格式非法（盐/长度不符）→ 视为配置错误，拒绝登录
-                return False
+        # 空值必须先挡：compare_digest(b"", b"") 为真，不挡就是"未配置即空密码可登录"
+        if not pw_plain:
             return False
-        if pw_plain:
-            if hmac.compare_digest(password.encode("utf-8"), pw_plain.encode("utf-8")):
-                request.session.update({"authenticated": True})
-                return True
-        # 均未配置（或明文比较失败）→ 拒绝登录
+        if hmac.compare_digest(password.encode("utf-8"), pw_plain.encode("utf-8")):
+            request.session.update({"authenticated": True})
+            return True
         return False
 
     async def logout(self, request: Request) -> bool:
@@ -224,10 +212,10 @@ class BucketSnapshotView(ModelView, model=BucketSnapshot):
 
 def create_admin(app=None) -> Admin:
     """创建 SQLAdmin 实例并注册所有模型"""
-    # v10.1修复：均未配置管理凭据时拒绝一切登录，启动时以 [FATAL] 明示面板已禁用
-    if not os.environ.get("ACU_ADMIN_PASSWORD_HASH") and not os.environ.get("ACU_ADMIN_PASSWORD"):
+    # v10.1修复：未配置管理凭据时拒绝一切登录，启动时以 [FATAL] 明示面板已禁用
+    if not os.environ.get("ACU_ADMIN_PASSWORD"):
         logging.getLogger("acu.gateway").error(
-            "[FATAL] 未配置 ACU_ADMIN_PASSWORD_HASH / ACU_ADMIN_PASSWORD，"
+            "[FATAL] 未配置 ACU_ADMIN_PASSWORD，"
             "SQLAdmin 数据库面板(/gw/dbadmin)已禁用所有登录"
         )
     authentication_backend = AdminAuth(secret_key=os.environ.get("ADMIN_SESSION_SECRET", ""))
