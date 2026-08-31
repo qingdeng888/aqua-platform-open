@@ -170,7 +170,7 @@ check(!!mtDefaultBudget && feInputDefault === mtDefaultBudget && feClampFallback
 
 /* 8f) 模型管理页：动作齐全 + 搜索为前端即时过滤 + 隐藏即禁用开关 */
 const mdlActs = ['model-add', 'model-delete', 'model-toggle', 'model-bulk-hide',
-  'model-bulk-show', 'model-refresh'];
+  'model-bulk-show', 'model-refresh', 'model-alias', 'alias-edit', 'alias-delete'];
 const missingMdl = mdlActs.filter((a) => !dataSrc.includes(`GW.actions['${a}']`));
 check(missingMdl.length === 0, `模型管理动作齐全 (缺失: ${missingMdl.join(', ') || '无'})`);
 check(allJs.includes("'/models/visibility'") && allJs.includes("'/models/block-setting'"),
@@ -186,6 +186,29 @@ check(mdlPaint.length > 0 && /esc\(r\.model_id\)/.test(mdlPaint) &&
   !/\$\{/.test(mdlPaint) && !/data-act="model-[a-z-]+" data-id="/.test(mdlPaint),
   '模型表格经 esc() 输出模型 ID，行动作只带 data-idx');
 
+/* 8f2) 模型别名 / 映射：同页新增卡片表格，共用同一个搜索词 */
+check(allJs.includes("'/models/alias'") && /method: 'PUT'/.test(dataSrc) &&
+  /\/models\/alias\?alias=' \+ encodeURIComponent/.test(dataSrc),
+  '别名调用 PUT /models/alias 与 DELETE /models/alias?alias=（值经 encodeURIComponent）');
+// 别名文本来自管理员输入，渲染必须转义（badge() 内部 esc）；行动作只带 data-idx
+const aliasPaint = (dataSrc.match(/function paintAliasTable\([\s\S]*?\n}/) || [''])[0];
+check(aliasPaint.length > 0 && /esc\(r\.alias\)/.test(aliasPaint) &&
+  /esc\(r\.target_model\)/.test(aliasPaint) && !/\$\{/.test(aliasPaint) &&
+  !/data-act="alias-[a-z-]+" data-id="/.test(aliasPaint),
+  '别名表经 esc() 输出别名与目标模型，行动作只带 data-idx');
+check(/\(r\.aliases \|\| \[\]\)\.map\(function \(a\) \{ return badge\(a, 'blue'\); \}\)/.test(mdlPaint),
+  '模型表格的「别名」列经 badge()（内部 esc）渲染，不做字符串内插');
+check(/function matchedAliases\(/.test(dataSrc) &&
+  /r\.aliases \|\| \[\]\)\.some/.test(dataSrc) &&
+  /addEventListener\('input'[\s\S]{0,160}paintAliasTable\(\)/.test(dataSrc),
+  '同一个搜索框同时过滤模型表与别名表，且模型搜索命中别名文本');
+check(/keep_original: v\.keep_original === '1'/.test(dataSrc) &&
+  /force_mapping: v\.force_mapping === '1'/.test(dataSrc) &&
+  /type: 'select'/.test(dataSrc),
+  '别名弹窗用 select 表达布尔开关（保留原名 / 回写响应），未改动 core.js');
+check(/target_missing \? badge\('目标已不存在', 'red'\)/.test(aliasPaint),
+  '目标模型已不存在的别名行有红色徽标提示清理');
+
 /* 8g) 后端：白名单已下线，可见性与「名称有效性」分离 */
 const pubSrc = readFileSync(join(repoRoot, 'gateway', 'app', 'public_api.py'), 'utf8');
 check(!/_VERIFIED_WORKING_MODELS/.test(pubSrc),
@@ -196,6 +219,31 @@ check(/refresh_verified_models\(all_known_models\(raw, overrides\)\)/.test(pubSr
   '模型ID纠错基于「真实存在」全量集合（含被隐藏项），隐藏不会导致静默改写模型');
 check(/code": "model_disabled/.test(pubSrc) && /is_call_blocked\(model\)/.test(pubSrc),
   '开关开启时隐藏模型调用返回 400 model_disabled');
+
+/* 8h) 别名层后端：解析在纠错之前、别名不进纠错集合、全链路只用真名 */
+const regSrc = readFileSync(join(repoRoot, 'gateway', 'app', 'model_registry.py'), 'utf8');
+check(/apply_aliases\(apply_overrides\(raw, overrides\), aliases\)/.test(pubSrc),
+  '对外列表 = 上游全量 → 覆盖层 → 别名层');
+const chatBody = pubSrc.split('async def chat_completions(')[1].split(/\n(?:@router\.|async def |def )/)[0];
+check(chatBody.indexOf('await resolve_alias(model)') >= 0 &&
+  chatBody.indexOf('await resolve_alias(model)') <
+    chatBody.indexOf('validate_and_correct_model(model)'),
+  '别名解析发生在模型纠错之前（别名进纠错集合会被模糊改写成别名再发上游 → 404）');
+check(/body\["model"\] = real_model/.test(chatBody) &&
+  (pubSrc.match(/refresh_verified_models\(/g) || []).length === 1 &&
+  !/refresh_verified_models\(apply_aliases/.test(pubSrc),
+  '解析后全链路只用真名：body["model"] 改写，纠错集合仍只吃 all_known_models');
+const embBody = pubSrc.split('async def embeddings(')[1].split('\n\n\n')[0];
+check(/await resolve_alias\(model\)/.test(embBody),
+  '/v1/embeddings 也解析别名（该端点没有纠错步骤）');
+const mtSrc = readFileSync(join(repoRoot, 'gateway', 'app', 'model_test.py'), 'utf8');
+check(/await resolve_alias\(model\)/.test(mtSrc) && /"model": real_model/.test(mtSrc),
+  '模型测试的直连探测先把别名解析回真名');
+check(/CREATE UNIQUE INDEX IF NOT EXISTS idx_model_aliases_lower/.test(
+  readFileSync(join(repoRoot, 'gateway', 'app', 'database.py'), 'utf8')),
+  'model_aliases 建了 lower(alias) 唯一索引（别名解析大小写不敏感）');
+check(/keep_original: bool = False/.test(regSrc) && /force_mapping: bool = True/.test(regSrc),
+  '别名默认语义：替换真名（keep_original=0）+ 回写响应 model（force_mapping=1）');
 
 /* 9) 纯网关形态：前端不得残留已下线的 platform 耦合端点 */
 const removed = ['/platform-tokens', '/system/user-stats', '/system/health'];

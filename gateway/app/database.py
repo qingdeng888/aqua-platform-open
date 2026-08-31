@@ -437,6 +437,24 @@ def init_db() -> None:
             );
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_model_overrides_hidden ON model_overrides(hidden);")
+        # 模型别名层：把上游真实模型 ID 改名对外（alias → target_model）。
+        # keep_original=1 真名与别名并存于列表；force_mapping=1 把响应体 model 回写成别名。
+        # lower(alias) 唯一索引是必需的：别名解析大小写不敏感，若允许 NV/x 与 nv/x 并存，
+        # 解析结果就不确定。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS model_aliases (
+                alias TEXT PRIMARY KEY,
+                target_model TEXT NOT NULL,
+                display_name TEXT DEFAULT '',
+                keep_original INT DEFAULT 0,
+                force_mapping INT DEFAULT 1,
+                remark TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+        """)
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_aliases_lower ON model_aliases (lower(alias));")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_model_aliases_target ON model_aliases(target_model);")
         conn.commit()
 
         # 迁移：为 request_logs 添加毫秒级精准统计字段

@@ -309,36 +309,51 @@ async def fetch_upstream_models() -> list:
 
 
 async def get_model_list() -> list:
-    """对外模型列表 = 上游实时全量 + 管理员覆盖层（隐藏项剔除、手动补录项追加）
+    """对外模型列表 = 上游实时全量 + 管理员覆盖层（隐藏剔除、手动补录追加）+ 别名层（改名）
 
     同时把「真实存在的全量模型」（含被隐藏项）推给模型ID纠错器：可见性与名称有效性
     是两件事，否则隐藏一个模型会让指名调用它的请求被模糊匹配改写到相近的另一个模型上。
+    纠错集合只吃 all_known_models（真名），**别名一律不进**：纠错返回值会直接写进
+    body["model"]，别名进了集合就可能被模糊匹配改写成别名再发给上游 → 404。
+    别名在 chat_completions 里于纠错之前就已换成真名，无需纠错器认识它。
     """
-    from app.model_registry import all_known_models, apply_overrides, get_overrides
+    from app.model_registry import (
+        all_known_models, apply_aliases, apply_overrides, get_snapshot,
+    )
 
     raw = await fetch_upstream_models()
-    overrides = await get_overrides()
+    overrides, aliases, _ = await get_snapshot()
     refresh_verified_models(all_known_models(raw, overrides))
-    return apply_overrides(raw, overrides)
+    return apply_aliases(apply_overrides(raw, overrides), aliases)
 
 
 # ========== 模型列表端点 ==========
 
 def _enrich_model_list(models: list) -> list:
-    """为模型列表添加能力标签和友好名称（基于NIM模型目录）"""
+    """为模型列表添加能力标签和友好名称（基于NIM模型目录）
+
+    别名条目按其目标真名查目录（别名不在 NIM_MODEL_CATALOG 里），
+    但管理员在别名上填的 display_name 优先于目录值。
+    """
     try:
         from app.nim_models import NIM_MODEL_CATALOG, get_model_sort_priority
     except ImportError:
         return models
 
+    from app.model_registry import alias_real_map
+
     priorities = get_model_sort_priority()
+    alias_real = alias_real_map()
 
     enriched = []
     for m in models:
         model_id = m.get("id", "")
-        info = NIM_MODEL_CATALOG.get(model_id)
+        # 别名条目查目录要用真名；真名条目 lookup_id == model_id
+        lookup_id = alias_real.get(model_id) or model_id
+        info = NIM_MODEL_CATALOG.get(lookup_id)
 
         enriched_model = dict(m)
+        custom_display_name = enriched_model.get("display_name") or ""
 
         if info:
             # 从NIM模型目录获取详细信息
@@ -388,7 +403,7 @@ def _enrich_model_list(models: list) -> list:
         else:
             # 不在目录中的模型，推断基本能力
             capabilities = []
-            model_lower = model_id.lower()
+            model_lower = lookup_id.lower()
             if any(kw in model_lower for kw in ["vision", "vl", "fuyu", "kosmos", "omni"]):
                 capabilities.append("视觉")
             if any(kw in model_lower for kw in ["embed", "bge-m3", "arctic-embed"]):
@@ -407,8 +422,12 @@ def _enrich_model_list(models: list) -> list:
                 capabilities.append("推理")
             enriched_model["capabilities"] = capabilities
 
+        # 管理员在别名上填的显示名优先于目录值
+        if custom_display_name:
+            enriched_model["display_name"] = custom_display_name
+
         # 排序优先级
-        enriched_model["sort_priority"] = priorities.get(model_id, 999)
+        enriched_model["sort_priority"] = priorities.get(lookup_id, 999)
 
         enriched.append(enriched_model)
 
@@ -445,9 +464,13 @@ async def public_models():
 
 async def _handle_stream_request(
     scheduler, client_id, key_id, model,
-    upstream_url, headers, body, timeout, start_time, request
+    upstream_url, headers, body, timeout, start_time, request,
+    alias_out: str = ""
 ):
     """处理流式SSE请求
+
+    alias_out：非空时把每个 SSE chunk 的 model 字段回写成该别名（force_mapping），
+    空则字节级透传。
 
      优化：
     - per-chunk空闲超时检测（而非全局超时）
@@ -626,8 +649,13 @@ async def _handle_stream_request(
                                 prompt_tokens = usage.get("prompt_tokens", 0)
                                 completion_tokens = usage.get("completion_tokens", 0)
                                 total_tokens = usage.get("total_tokens", 0)
+                            # 别名回写：下游只知道别名，响应里的 model 也应是别名（force_mapping）。
+                            # alias_out 为空时根本不进这个分支的改写，无别名请求保持字节级透传。
+                            if alias_out and isinstance(data, dict) and data.get("model"):
+                                data["model"] = alias_out
+                                line = "data: " + json.dumps(data, ensure_ascii=False)
                         except json.JSONDecodeError:
-                            pass
+                            pass    # 非 JSON 数据行原样透传
                     yield f"{line}\n\n"
                     last_keepalive_time = now  # 收到数据时重置keepalive计时
                 # 空行无需特殊处理（keepalive已由上面的超时心跳机制承担）
@@ -751,9 +779,12 @@ async def _handle_stream_request(
 
 async def _handle_nonstream_request(
     scheduler, client_id, key_id, model,
-    upstream_url, headers, body, timeout, start_time, request=None
+    upstream_url, headers, body, timeout, start_time, request=None,
+    alias_out: str = ""
 ):
     """处理非流式请求
+
+    alias_out：非空时把响应体的 model 字段回写成该别名（force_mapping）。
 
     返回值：
     - 成功: JSONResponse
@@ -781,6 +812,11 @@ async def _handle_nonstream_request(
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             total_tokens = usage.get("total_tokens", 0)
+
+            # 别名回写：下游只知道别名，响应里的 model 也应是别名（force_mapping）。
+            # 放在日志之前，保证入库的 response_body 与下游所见一致。
+            if alias_out and isinstance(data, dict) and data.get("model"):
+                data["model"] = alias_out
 
             scheduler.record_response(key_id, model, True, rt, 200, "")
             scheduler.release_client_request(client_id)
@@ -915,11 +951,12 @@ async def _handle_nonstream_request(
 )
 async def _call_upstream(
     scheduler, client_id, model, upstream_url, body, timeout, is_stream, request,
-    dispatch_start_time=None
+    dispatch_start_time=None, alias_out=""
 ):
     """带tenacity重试的上游调用 - 聊天补全
 
     每次重试会重新选择密钥，遇到429/5xx/连接错误抛出UpstreamRetryableError触发重试。
+    model 始终是**真名**（别名已在入口解析），alias_out 仅用于把响应体的 model 回写成别名。
     """
     # : 记录密钥选择耗时（网关调度延迟度量）
     _key_select_start = time.time()
@@ -971,12 +1008,14 @@ async def _call_upstream(
         if is_stream:
             return await _handle_stream_request(
                 scheduler, client_id, key_id, model,
-                upstream_url, headers, body, timeout, start_time, request
+                upstream_url, headers, body, timeout, start_time, request,
+                alias_out=alias_out
             )
         else:
             return await _handle_nonstream_request(
                 scheduler, client_id, key_id, model,
-                upstream_url, headers, body, timeout, start_time, request
+                upstream_url, headers, body, timeout, start_time, request,
+                alias_out=alias_out
             )
     except UpstreamRetryableError:
         raise  # 让tenacity处理重试
@@ -1109,6 +1148,19 @@ async def chat_completions(request: Request):
             "code": "missing_model",
         })
 
+    # === 模型别名解析（必须在纠错之前）===
+    # 别名不在纠错集合里，若先跑纠错，'nv/kimi-k3' 会被模糊匹配改写到某个相近真名上，
+    # 甚至直接原样发给上游 → 404。解析后全链路只用真名（熔断器 key、密钥分桶、
+    # 请求日志、统计），别名只在对外列表和响应体 model 字段这两处出现。
+    from app.model_registry import all_known_models, get_overrides, is_call_blocked, resolve_alias
+
+    real_model, alias_used, force_map = await resolve_alias(model)
+    if alias_used:
+        logger.info(f"模型别名解析: '{alias_used}' -> '{real_model}'")
+        body["model"] = real_model
+        model = real_model
+    alias_out = alias_used if (alias_used and force_map) else ""
+
     # === v9.2: 模型ID智能映射与纠错 ===
     corrected_model, was_corrected = validate_and_correct_model(model)
     if was_corrected:
@@ -1125,7 +1177,7 @@ async def chat_completions(request: Request):
         })
 
     # === 模型停用检查：被管理员隐藏 且「隐藏的模型同时禁止调用」开关打开时才拦截 ===
-    from app.model_registry import is_call_blocked
+    # 入参是解析后的真名，用别名调用同样被拦（绕不过去）
     if await is_call_blocked(model):
         logger.info(f"模型已被管理员停用，拒绝调用: '{model}'")
         raise HTTPException(status_code=400, detail={
@@ -1134,7 +1186,8 @@ async def chat_completions(request: Request):
             "code": "model_disabled",
         })
 
-    # === v9.2: 检查模型是否存在（对照上游实时全量列表 + 手动补录项） ===
+    # === v9.2: 检查模型是否存在（对照「真实存在」全量集合：上游全量 ∪ 手动补录，含被隐藏项）===
+    # 不能拿对外可见列表比对：被隐藏的模型、被别名替换掉的真名都会误报 warning。
     try:
         is_known = bool(_models_cache["data"]) and any(
             m.get("id") == model for m in _models_cache["data"] if isinstance(m, dict)
@@ -1142,8 +1195,9 @@ async def chat_completions(request: Request):
         if not is_known:
             # 缓存未命中时回源一次（同时刷新模型ID纠错器的已知集合）
             try:
-                known_models = await get_model_list()
-                is_known = any(m.get("id") == model for m in known_models if isinstance(m, dict))
+                await get_model_list()
+                known_models = all_known_models(await fetch_upstream_models(), await get_overrides())
+                is_known = any(m.get("id") == model for m in known_models)
             except Exception:
                 pass
         if not is_known:
@@ -1200,7 +1254,7 @@ async def chat_completions(request: Request):
     try:
         return await _call_upstream(
             scheduler, client_id, model, upstream_url, body, timeout, is_stream, request,
-            dispatch_start_time=_request_start_ts
+            dispatch_start_time=_request_start_ts, alias_out=alias_out
         )
     except HTTPException as e:
         # v10.0 修复：记录服务不可用等HTTP异常日志
@@ -1379,10 +1433,11 @@ async def _log_request(*args, **kwargs):
     retry=retry_if_exception_type(UpstreamRetryableError),
     reraise=True
 )
-async def _call_upstream_embeddings(scheduler, client_id, model, url, body):
+async def _call_upstream_embeddings(scheduler, client_id, model, url, body, alias_out=""):
     """带tenacity重试的上游调用 - 向量化
 
     每次重试会重新选择密钥，遇到429/5xx/连接错误抛出UpstreamRetryableError触发重试。
+    model 始终是**真名**（别名已在入口解析），alias_out 仅用于把响应体的 model 回写成别名。
     """
     select_result = await asyncio.to_thread(scheduler.select_key, model)
     if not select_result:
@@ -1412,7 +1467,11 @@ async def _call_upstream_embeddings(scheduler, client_id, model, url, body):
             # v10.0 防呆防傻：记录熔断器成功
             cb = get_circuit_breaker()
             cb.record_success(f"embeddings:{model}")
-            return JSONResponse(status_code=200, content=resp.json())
+            data = resp.json()
+            # 别名回写：下游只知道别名，响应里的 model 也应是别名（force_mapping）
+            if alias_out and isinstance(data, dict) and data.get("model"):
+                data["model"] = alias_out
+            return JSONResponse(status_code=200, content=data)
         elif resp.status_code == 429:
             # 429 - 触发桶级冷却并切换密钥重试
             scheduler.record_response(key_id, model, False, rt, 429, "429")
@@ -1477,6 +1536,16 @@ async def embeddings(request: Request):
             "code": "missing_model",
         })
 
+    # === 模型别名解析（本端点没有纠错步骤，别名不解析会被原样发给上游 → 404）===
+    from app.model_registry import resolve_alias
+
+    real_model, alias_used, force_map = await resolve_alias(model)
+    if alias_used:
+        logger.info(f"模型别名解析(embeddings): '{alias_used}' -> '{real_model}'")
+        body["model"] = real_model
+        model = real_model
+    alias_out = alias_used if (alias_used and force_map) else ""
+
     # === v10.0: embeddings 安全校验已移除 ===
 
     # v10.0 防呆防傻：embeddings 熔断器检查
@@ -1494,7 +1563,9 @@ async def embeddings(request: Request):
 
     _emb_start_ts = time.time()
     try:
-        result = await _call_upstream_embeddings(scheduler, client_info["client_id"], model, url, body)
+        result = await _call_upstream_embeddings(
+            scheduler, client_info["client_id"], model, url, body, alias_out=alias_out
+        )
         cb.record_success(cb_key)
         # v10.0 修复：记录 embeddings 成功日志
         await _log_request(

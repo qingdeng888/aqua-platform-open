@@ -281,6 +281,12 @@ async def probe_model(req: ProbeRequest, request: Request):
     prompt = normalize_prompt(req.prompt)
     max_tokens = clamp_max_tokens(req.max_tokens)
 
+    # 本端点直连上游，而 /model-test/models 列表与下游客户一致（可能是别名），
+    # 故必须先把别名解析回真名，否则别名会被原样发给上游 → 404
+    from app.model_registry import resolve_alias
+
+    real_model, alias_used, _ = await resolve_alias(model)
+
     select_result = await asyncio.to_thread(get_scheduler().select_any_key)
     if not select_result:
         raise HTTPException(status_code=503, detail="所有上游密钥暂不可用，无法执行直连测试")
@@ -296,14 +302,15 @@ async def probe_model(req: ProbeRequest, request: Request):
     egress = "proxy" if await proxy_pool.resolve_url(key_id) else "direct"
 
     body = {
-        "model": model,
+        "model": real_model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0,
         "stream": False,
     }
     result = {
-        "model": model, "channel": "upstream", "egress": egress,
+        "model": model, "upstream_model": real_model, "alias_used": alias_used,
+        "channel": "upstream", "egress": egress,
         "key_masked": mask_secret(api_key), "prompt_used": prompt,
     }
 

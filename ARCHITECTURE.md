@@ -562,7 +562,7 @@ Gateway (:8000)
 
 ### 6.5 模型列表与覆盖层
 
-对外模型列表 = **上游 `/models` 实时全量 ± 管理员覆盖层**。v12.1 之前 `public_api.py` 里有一份硬编码的 `_VERIFIED_WORKING_MODELS`（24 条）与上游结果取交集，实测把 83 个真实模型压到 23 个，且上游上新必须改代码；该白名单已删除。
+对外模型列表 = **上游 `/models` 实时全量 ± 管理员覆盖层 → 别名层改名**。v12.1 之前 `public_api.py` 里有一份硬编码的 `_VERIFIED_WORKING_MODELS`（24 条）与上游结果取交集，实测把 83 个真实模型压到 23 个，且上游上新必须改代码；该白名单已删除。
 
 ```
 上游 GET /models
@@ -574,20 +574,32 @@ _models_cache（60s TTL，原样全量，不做任何过滤）
 get_model_list()  ◀── model_overrides 覆盖层（30s 快照缓存，进程内）
       │                 hidden=1 → 从列表剔除
       │                 manual=1 → 上游没有则追加（owned_by="manual"）
+      │
+      ▼
+apply_aliases()   ◀── model_aliases 别名层（同一份 30s 快照）
+      │                 真名换成自定义别名（keep_original=1 则真名与别名并存）
       ├──────────────▶ _enrich_model_list() → /v1/models、/api/v1/models、/api/public/models
+      │                   （先经 alias_real_map() 把别名换回真名再查目录）
       │
       └──────────────▶ refresh_verified_models(all_known_models(raw, overrides))
                           即「真实存在」全量集合 = 上游 ∪ 手动补录（含被隐藏项）
+                          ⚠ 只吃真名，别名**不进**纠错集合
 ```
+
+四层流水线：**上游全量 → 覆盖层（隐藏 / 补录）→ 别名层（改名）→ 富化（展示元数据）**。
 
 | 组件 | 位置 | 职责 |
 |------|------|------|
 | `fetch_upstream_models()` | `public_api.py` | 回源上游 `/models`，只丢弃无 `id` 的脏条目，60 秒缓存 |
-| `get_model_list()` | `public_api.py` | 唯一对外取数入口：叠加覆盖层 + 推送纠错集合 |
+| `get_model_list()` | `public_api.py` | 唯一对外取数入口：叠加覆盖层 + 别名层 + 推送纠错集合 |
 | `apply_overrides()` | `model_registry.py` | 纯函数：剔除隐藏项、追加排序后的手动补录项（上游已收录则以上游条目为准） |
+| `apply_aliases()` | `model_registry.py` | 纯函数：可见列表 → 对外列表。真名条目原位替换为别名条目（`id` 换名、`owned_by` 取别名的 provider 段、`display_name` 优先取管理员填的），同 target 多别名按名排序追加；任一别名 `keep_original=1` 则保留真名条目（OR，保留是更安全的一侧）；target 不在可见列表（被隐藏 / 不在上游）则该别名条目也不出现 |
+| `resolve_alias_pure()` | `model_registry.py` | 纯函数：三级匹配（精确 → 小写 → 去分隔符标准化）返回 `(真名, 命中的别名, force_mapping)`；**不做 difflib 模糊**，模糊留给下游纠错器 |
+| `alias_real_map()` | `model_registry.py` | 同步读快照返回 `{别名: 真名}`，供同步的 `_enrich_model_list()` 把别名换回真名查目录 |
 | `all_known_models()` | `model_registry.py` | 纯函数：**含被隐藏项**的全量集合，喂给模型 ID 纠错 |
-| `build_admin_rows()` | `model_registry.py` | 管理视图行（来源 / 状态 / 备注 / 更新时间）+ 关键词过滤 |
-| `get_snapshot()` | `model_registry.py` | 覆盖层 + 开关的 30 秒快照；查库异常时**返回上一份快照**而非空（宁可多列几个模型，也不能因一次库抖动清空模型列表） |
+| `build_admin_rows()` | `model_registry.py` | 管理视图行（来源 / 状态 / 别名 / 备注 / 更新时间）+ 关键词过滤（命中别名文本） |
+| `build_alias_rows()` | `model_registry.py` | 别名表行，带 `target_missing`（target 已不在上游 ∪ 手动补录，提示管理员清理） |
+| `get_snapshot()` | `model_registry.py` | 覆盖层 + 别名 + 开关的 30 秒快照（三元组）；查库异常时**返回上一份快照**而非空（宁可多列几个模型，也不能因一次库抖动清空模型列表） |
 | `is_call_blocked()` | `model_registry.py` | 聊天链路判定：开关关 → 恒 `False`；开关开 → 仅拦被隐藏项 |
 
 **关键不变量：可见性 ≠ 名称有效性。** 纠错集合必须是全量集合（含被隐藏项）。若把可见列表喂给 `refresh_verified_models()`，隐藏 `X` 之后客户端指名调 `X` 会被 6 级模糊匹配"纠正"成另一个相似模型——静默换模型比直接报错危险得多。
@@ -605,6 +617,45 @@ get_model_list()  ◀── model_overrides 覆盖层（30s 快照缓存，进�
 
 **导入方向约束**：`model_registry` 从 `admin_api` 取 `require_admin`，而 `admin_api` 在模块级 import `public_api`。因此 `public_api` 对 `model_registry` 的引用**必须是函数内局部导入**，否则形成 `public_api → admin_api → model_registry → public_api` 循环。
 
+#### 别名层（改名）
+
+把上游真实模型 ID 映射成自定义名，下游拿到的列表里就是自定义名，用自定义名调用能正常转发（`moonshotai/kimi-k3` → 对外 `nv/kimi-k3`）。语义对齐 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)：
+
+| CLIProxyAPI | 本项目 | 默认 | 含义 |
+|---|---|---|---|
+| `name` | `target_model` | — | 真实上游模型 ID，必须存在于全量集合 |
+| `alias` | `alias` | — | 对外暴露的名字（主键，大小写不敏感唯一） |
+| `display-name` | `display_name` | `''` | 可选显示名，不被 `NIM_MODEL_CATALOG` 覆盖 |
+| `fork` | `keep_original` | `0` | 1 = 真名与别名并存于列表；0 = 别名替换真名 |
+| `force-mapping` | `force_mapping` | `1` | 1 = 把响应体 `model` 回写成别名 |
+
+与 CLIProxyAPI 一致：解析**大小写不敏感**、解析在**模型校验之前**、**多别名可指向同一上游模型**、`/v1/embeddings` 同样生效。两处刻意偏离：
+
+- `force_mapping` **默认开**。CLIProxyAPI 默认关是多 provider 兼容顾虑；本网关只有 NIM 一个上游，下游只看到别名却在响应里收到真名并不一致，还会把真实厂商名漏回去。逐条可关。
+- 别名与真实模型 ID 撞名**拒绝写入**（`400 alias_conflicts_model`）。CLIProxyAPI 是别名优先、静默遮蔽真实模型——遮蔽是陷阱，防呆比灵活重要。
+
+**关键不变量一：别名不进纠错集合。** 纠错器的返回值会直接写进 `body["model"]`，一旦别名进了纠错集合，6 级模糊匹配就可能把请求改写成别名再原样发给上游 → 404。所以 `refresh_verified_models()` 继续只吃 `all_known_models(raw, overrides)`（源码里全文只有这一处调用，静态检查守着）。
+
+**关键不变量二：解析发生在校验之前。** `chat_completions()` 里 `resolve_alias(model)` 的下标必须小于 `validate_and_correct_model(model)`（契约测试按源码下标断言先后）。别名在进纠错器之前就已换成真名，纠错器面对的永远是真名。
+
+**关键不变量三：全链路只用真名。** 熔断器 key `model:{model}`、`scheduler.select_key(model)` 分桶（别名单独分桶会让 429 冷却失效）、请求日志、统计——全部真名。别名只出现在两处：对外列表，与响应体 `model` 字段。
+
+**关键不变量四：不存在别名链。** `target_model` 必须是真实存在的模型（写入时对照 `all_known_models`，否则 `400 target_not_found`），禁止别名指向别名，解析永远一步到位。
+
+三个必须一起处理的旁路：
+
+| 旁路 | 位置 | 处理 |
+|---|---|---|
+| `/v1/embeddings` | `public_api.embeddings()` | 该端点**没有**纠错步骤，别名不解析就会原样发给上游；解析后按 `force_mapping` 回写响应 `model` |
+| 模型测试探测 | `model_test.probe_model()` | **直连上游**，而其模型列表来自 `get_model_list()`（含别名）；先解析回真名，结果回报 `upstream_model` |
+| 模型 ID 已知性检查 | `public_api` 的 `is_known` 告警 | 改为对照 `all_known_models(raw, overrides)`；否则被隐藏的模型与被别名替换掉的真名都会误报 warning |
+
+响应回写的两条纪律：**非流式**在写 `response_body` 日志**之前**改 `data["model"]`，日志与下游所见一致；**流式**逐 chunk 改写只落在 `json.loads` 成功分支内（解析失败仍原样透传），且 `alias_out` 为空时完全不进该分支——无别名请求保持字节级透传，零额外开销。
+
+真名一律**照旧放行**：别名只是多一个可用名字，不打断已配置好的客户端。要彻底禁掉真名，用现成的「隐藏」+「隐藏即禁调」开关即可，不新增机制；此时用**别名**调用同样返回 `400 model_disabled`（解析后按真名判定）。
+
+写入端的校验顺序（4 个错误码，测试按下标断言）：`invalid_model_id` → `alias_equals_target` → `alias_conflicts_model` → `target_not_found`。
+
 #### 数据模型
 
 ```sql
@@ -617,7 +668,22 @@ CREATE TABLE IF NOT EXISTS model_overrides (
     updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_model_overrides_hidden ON model_overrides(hidden);
+
+CREATE TABLE IF NOT EXISTS model_aliases (
+    alias         TEXT PRIMARY KEY,    -- 对外暴露的自定义名
+    target_model  TEXT NOT NULL,       -- 真实上游模型 ID（必须存在于全量集合）
+    display_name  TEXT DEFAULT '',     -- 可选显示名，不被 NIM_MODEL_CATALOG 覆盖
+    keep_original INT  DEFAULT 0,      -- 1 = 真名与别名并存（CLIProxyAPI 的 fork）
+    force_mapping INT  DEFAULT 1,      -- 1 = 响应体 model 回写成别名
+    remark        TEXT DEFAULT '',     -- 管理员备注，参与控制台搜索
+    created_at    TEXT NOT NULL,       -- UTC Z
+    updated_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_model_aliases_lower ON model_aliases (lower(alias));
+CREATE INDEX IF NOT EXISTS idx_model_aliases_target ON model_aliases (target_model);
 ```
+
+`lower(alias)` 唯一索引是**必需的**：解析大小写不敏感，若允许 `NV/x` 与 `nv/x` 并存，解析结果就不确定。代价是 upsert 不能只靠 `ON CONFLICT (alias)`——只改大小写（`nv/x` → `NV/x`）会撞 `lower(alias)` 唯一索引且穿透 `ON CONFLICT` 变成 500，故写入前先 `DELETE ... WHERE lower(alias)=lower(%s) AND alias <> %s`；删除同样按 `lower` 匹配，与解析口径一致。
 
 全字段明文，读取无需解密（与上游密钥的"解密后查重"形成对照）。建表与设置播种都在 `database.py` 的 `init_db()` / `seed_defaults()` 内幂等执行，升级无需迁移脚本。
 
@@ -1043,7 +1109,7 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 | **商用检测** | `/gw/admin/commercial-detection`、`/commercial/*` | 检测结果、阈值/开关、白名单、封禁与解封 |
 | **慷慨网关** | `GET /gw/admin/generous/status` | 免费额度水位线、供应商状态、负载均衡分布 |
 | **模型目录** | `/gw/admin/nim/models`、`/models/status`、`/sync-models`、`/validate-models` | NIM 模型列表、状态、同步与校验 |
-| **模型管理** | `GET/POST/DELETE /gw/admin/models`、`PUT /models/visibility`、`PUT /models/block-setting` | 管理视图（搜索 / 强制回源）、手动补录、删除手动项、批量隐藏与显示、「隐藏即禁调」开关（见 [6.5](#65-模型列表与覆盖层)） |
+| **模型管理** | `GET/POST/DELETE /gw/admin/models`、`PUT /models/visibility`、`PUT /models/block-setting`、`PUT/DELETE /models/alias` | 管理视图（搜索 / 强制回源）、手动补录、删除手动项、批量隐藏与显示、「隐藏即禁调」开关、模型别名 / 映射增删改（见 [6.5](#65-模型列表与覆盖层)） |
 | **系统监控** | `/gw/admin/system/concurrency`、`/system/ip-monitor/*` | 并发汇总、IP 监控、异常与封禁列表、手动解封 |
 | **熔断/错误** | `/gw/admin/circuit-breakers`、`/error-codes`、`/error-stats`、`/active-errors` | 熔断器状态与重置、错误码字典与统计 |
 | **配置** | `/gw/admin/settings`、`/maintenance` | 系统配置读写、维护模式热切换 |
@@ -1147,20 +1213,23 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 
 ### 10.7 模型管理页
 
-控制台「模型管理」页消费 `/gw/admin/models*`，是覆盖层的唯一人机入口：
+控制台「模型管理」页消费 `/gw/admin/models*`，是覆盖层与别名层的唯一人机入口（不新增导航项，别名表在同页下方）：
 
 | 能力 | 实现要点 |
 |------|---------|
-| 搜索 | **前端本地过滤**（同时匹配模型 ID 与备注），输入即重绘；只重绘表格与计数，输入框不重建所以焦点与光标位置不丢 |
+| 搜索 | **前端本地过滤**（同时匹配模型 ID、备注与别名文本），输入即重绘；**同一个搜索词同时过滤模型表与别名表**；只重绘表格与计数，输入框不重建所以焦点与光标位置不丢 |
 | 隐藏 / 显示 | 单行按钮，或对**当前搜索结果**批量操作（单批上限 `VISIBILITY_MAX_IDS = 500`） |
 | 手动补录 | 校验 `^[A-Za-z0-9._:/-]+$` 且长度 ≤ 200；模型 ID 非机密，校验失败原因照实回显 |
 | 删除 | `DELETE ... WHERE model_id = %s AND manual = 1`，非手动项返回 404 `not_manual_model`（上游自带模型删了下次回源又出现，语义上只能"隐藏"） |
 | 强制回源 | `?refresh=1` 跳过 60 秒上游缓存 |
 | 开关 | 「隐藏的模型同时禁止调用」，写 `admin_settings.hidden_models_block_calls` |
+| 别名列 + 「+ 别名」 | 模型表新增「别名」列（`badge()` 渲染，内部已 `esc()`，不二次转义）；行动作 `model-alias` 直接以**该行模型**为 target 开弹窗，管理员不用手输 `target_model`，撞不到拼错 |
+| 别名表 | 下方「模型别名 / 映射」卡片：`别名 \| 目标模型 \| 显示名 \| 保留原名 \| 回写响应 \| 备注 \| 操作`；`target_missing` 的行打红色徽标「目标已不存在」提示清理 |
+| 别名增删改 | `PUT /gw/admin/models/alias`（按 alias upsert）、`DELETE /gw/admin/models/alias?alias=`（值经 `encodeURIComponent`）；两个布尔用 `select`（是/否）表达，故 `formModal` 无需支持 checkbox，`core.js` 零改动 |
 
 写路径统一形状：参数校验 → `asyncio.to_thread(_write)` → `invalidate()` 让 30 秒快照立即失效 → 审计（批量操作走 `insert_audit_many()` 一模型一行）。**单 worker 部署前提下**进程内失效即全局权威。
 
-XSS 纪律：模型 ID 来自上游，渲染全程 `esc()`；行按钮只带 `data-act` + `data-idx`，实际数据按索引从缓存读（过滤时重新打 `_i` 标记，避免过滤后索引错位）。
+XSS 纪律：模型 ID 来自上游、别名与备注来自管理员输入，渲染全程 `esc()`（或内部已 `esc()` 的 `badge()`）；行按钮只带 `data-act` + `data-idx`，实际数据按索引从缓存读（过滤时重新打 `_i` 标记，避免过滤后索引错位）。
 
 ### 10.8 SQLAdmin 数据库管理
 

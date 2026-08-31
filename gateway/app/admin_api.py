@@ -2787,7 +2787,7 @@ async def sync_upstream_models(request: Request):
         _models_cache["expires"] = 0
         models = await get_model_list()
         return {"count": len(models), "models": [m.get("id","") for m in models[:50]],
-                "note": "上游实时全量，已应用「模型管理」页的隐藏/手动补录"}
+                "note": "上游实时全量，已应用「模型管理」页的隐藏/手动补录/别名映射"}
     except Exception as e:
         logger.error(f"上游模型同步失败: {e}")
         return {"error": str(e), "count": 0, "models": []}

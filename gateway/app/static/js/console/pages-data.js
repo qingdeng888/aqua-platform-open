@@ -394,9 +394,11 @@ GW.actions['upstream-delete'] = function (ds) {
 
 /* ================================================================
  *  模型管理 — GET/POST/DELETE /models,
- *             PUT /models/visibility, PUT /models/block-setting
- *  列表 = 上游实时全量 + 覆盖层（隐藏 / 手动补录）。搜索在前端即时过滤：
- *  不发请求、不重建输入框（焦点与光标位置不丢）。
+ *             PUT /models/visibility, PUT /models/block-setting,
+ *             PUT/DELETE /models/alias
+ *  列表 = 上游实时全量 + 覆盖层（隐藏 / 手动补录）+ 别名层（改名）。
+ *  搜索在前端即时过滤：不发请求、不重建输入框（焦点与光标位置不丢），
+ *  同一个搜索词同时过滤模型表与别名表。
  * ================================================================ */
 var mdlSearch = '';   // 搜索词跨重渲染保持
 
@@ -412,6 +414,9 @@ GW.R.models = async function (refresh) {
     var rows = d.models || [];
     rows.forEach(function (r, i) { r._i = i; });   // 行动作按原始下标取数，过滤不影响
     GW.cache.models = rows;
+    var aliases = d.aliases || [];
+    aliases.forEach(function (r, i) { r._i = i; });
+    GW.cache.modelAliases = aliases;
 
     c.innerHTML = '';
     c.appendChild(GW.statGrid([
@@ -419,6 +424,7 @@ GW.R.models = async function (refresh) {
       { label: '对外可见', value: GW.fmtNum(d.visible_count) },
       { label: '已隐藏', value: GW.fmtNum(d.hidden_count) },
       { label: '手动补录', value: GW.fmtNum(d.manual_count) },
+      { label: '已设别名', value: GW.fmtNum(d.alias_count) },
     ]));
     c.appendChild(buildBlockToggle(!!d.block_calls));
     c.appendChild(buildModelFilterBar());
@@ -426,9 +432,15 @@ GW.R.models = async function (refresh) {
     wrap.className = 'table-wrap card';
     wrap.id = 'mdlTableWrap';
     c.appendChild(wrap);
+    c.appendChild(buildAliasCard());
     paintModelTable();
+    paintAliasTable();
     var inp = GW.$('mdlSearch');
-    inp.addEventListener('input', function () { mdlSearch = this.value; paintModelTable(); });
+    inp.addEventListener('input', function () {
+      mdlSearch = this.value;
+      paintModelTable();
+      paintAliasTable();
+    });
   } catch (e) {
     c.innerHTML = GW.errorCard(e.message);
   }
@@ -479,7 +491,7 @@ function buildModelFilterBar() {
   var bar = document.createElement('div');
   bar.className = 'filter-bar';
   bar.innerHTML =
-    '<input type="text" id="mdlSearch" placeholder="搜索模型 ID / 备注…" style="min-width:260px">' +
+    '<input type="text" id="mdlSearch" placeholder="搜索模型 ID / 备注 / 别名…" style="min-width:260px">' +
     '<button class="btn btn-sm" data-act="model-bulk-hide">隐藏筛选结果</button>' +
     '<button class="btn btn-sm" data-act="model-bulk-show">显示筛选结果</button>' +
     '<span class="text-sm text-dim" id="mdlCount"></span>';
@@ -487,14 +499,17 @@ function buildModelFilterBar() {
   return bar;
 }
 
-// 当前搜索词命中的行（模型 ID 或备注子串，不区分大小写）
+// 当前搜索词命中的行（模型 ID、备注或挂在该模型上的别名，子串、不区分大小写）
 function matchedModels() {
   var kw = (mdlSearch || '').trim().toLowerCase();
   var rows = GW.cache.models || [];
   if (!kw) return rows;
   return rows.filter(function (r) {
     return String(r.model_id).toLowerCase().indexOf(kw) !== -1 ||
-      String(r.remark || '').toLowerCase().indexOf(kw) !== -1;
+      String(r.remark || '').toLowerCase().indexOf(kw) !== -1 ||
+      (r.aliases || []).some(function (a) {
+        return String(a).toLowerCase().indexOf(kw) !== -1;
+      });
   });
 }
 
@@ -514,18 +529,22 @@ function paintModelTable() {
     wrap.appendChild(none);
     return;
   }
-  var html = '<table><thead><tr><th>模型 ID</th><th>来源</th><th>状态</th><th>备注</th>' +
-    '<th>更新时间</th><th>操作</th></tr></thead><tbody>';
+  var html = '<table><thead><tr><th>模型 ID</th><th>来源</th><th>状态</th><th>别名</th>' +
+    '<th>备注</th><th>更新时间</th><th>操作</th></tr></thead><tbody>';
   list.forEach(function (r) {
+    // badge() 内部已 esc()，别名文本不再二次转义
+    var al = (r.aliases || []).map(function (a) { return badge(a, 'blue'); }).join(' ');
     html += '<tr>' +
       '<td class="wrap-cell mono text-sm">' + esc(r.model_id) + '</td>' +
       '<td>' + (r.manual ? badge('手动补录', 'blue') : badge('上游', 'gray')) + '</td>' +
       '<td>' + (r.hidden ? badge('已隐藏', 'yellow') : badge('可见', 'green')) + '</td>' +
+      '<td class="wrap-cell text-sm">' + (al || '<span class="text-dim">-</span>') + '</td>' +
       '<td class="wrap-cell text-sm">' + esc(r.remark || '-') + '</td>' +
       '<td class="text-sm">' + esc(GW.fmtTime(r.updated_at)) + '</td>' +
       '<td><div class="cell-actions">' +
       '<button class="btn btn-sm" data-act="model-toggle" data-idx="' + r._i + '">' +
         (r.hidden ? '显示' : '隐藏') + '</button>' +
+      '<button class="btn btn-sm" data-act="model-alias" data-idx="' + r._i + '">+ 别名</button>' +
       (r.manual ? '<button class="btn btn-sm btn-danger" data-act="model-delete" data-idx="' +
         r._i + '">删除</button>' : '') +
       '</div></td></tr>';
@@ -610,6 +629,149 @@ GW.actions['model-delete'] = function (ds) {
 };
 
 GW.actions['model-refresh'] = function () { GW.R.models(true); };
+
+/* ---------------- 模型别名 / 映射 ----------------
+ * 别名 = 对外暴露的名字，目标模型 = 上游真实 ID。下游拿到的列表里是别名，
+ * 用别名调用会在校验之前被解析回真名；真名一律照旧放行。
+ * 「保留原名」= 列表里别名与真名并存；「回写响应」= 响应体的 model 字段也换成别名。
+ */
+function buildAliasCard() {
+  var card = document.createElement('div');
+  card.className = 'card mt-12';
+  var t = document.createElement('div');
+  t.className = 'card-title';
+  t.textContent = '模型别名 / 映射';
+  card.appendChild(t);
+  var p = document.createElement('p');
+  p.className = 'text-xs text-sec mb-12';
+  p.textContent = '把上游模型改名对外，例如 moonshotai/kimi-k3 → nv/kimi-k3。'
+    + '别名与真名撞名会被拒绝；目标模型被隐藏时，其别名也一并不出现在 /v1/models。';
+  card.appendChild(p);
+  var wrap = document.createElement('div');
+  wrap.className = 'table-wrap';
+  wrap.id = 'aliasTableWrap';
+  card.appendChild(wrap);
+  return card;
+}
+
+// 别名表复用同一个搜索词（别名 / 目标模型 / 备注）
+function matchedAliases() {
+  var kw = (mdlSearch || '').trim().toLowerCase();
+  var rows = GW.cache.modelAliases || [];
+  if (!kw) return rows;
+  return rows.filter(function (r) {
+    return String(r.alias).toLowerCase().indexOf(kw) !== -1 ||
+      String(r.target_model || '').toLowerCase().indexOf(kw) !== -1 ||
+      String(r.remark || '').toLowerCase().indexOf(kw) !== -1;
+  });
+}
+
+function paintAliasTable() {
+  var wrap = GW.$('aliasTableWrap');
+  if (!wrap) return;
+  var list = matchedAliases();
+  if (!list.length) {
+    wrap.innerHTML = '';
+    var none = document.createElement('div');
+    none.className = 'text-sm text-dim';
+    none.style.padding = '12px';
+    none.textContent = (GW.cache.modelAliases || []).length
+      ? '没有匹配的别名' : '尚未配置别名。在上方模型表格点「+ 别名」即可为该模型取一个对外名字。';
+    wrap.appendChild(none);
+    return;
+  }
+  var html = '<table><thead><tr><th>别名</th><th>目标模型</th><th>显示名</th>' +
+    '<th>保留原名</th><th>回写响应</th><th>备注</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(function (r) {
+    html += '<tr>' +
+      '<td class="wrap-cell mono text-sm">' + esc(r.alias) + '</td>' +
+      '<td class="wrap-cell mono text-sm">' + esc(r.target_model) + ' ' +
+        (r.target_missing ? badge('目标已不存在', 'red') : '') + '</td>' +
+      '<td class="wrap-cell text-sm">' + esc(r.display_name || '-') + '</td>' +
+      '<td>' + (r.keep_original ? badge('并存', 'blue') : badge('替换', 'gray')) + '</td>' +
+      '<td>' + (r.force_mapping ? badge('是', 'green') : badge('否', 'gray')) + '</td>' +
+      '<td class="wrap-cell text-sm">' + esc(r.remark || '-') + '</td>' +
+      '<td><div class="cell-actions">' +
+      '<button class="btn btn-sm" data-act="alias-edit" data-idx="' + r._i + '">编辑</button>' +
+      '<button class="btn btn-sm btn-danger" data-act="alias-delete" data-idx="' + r._i +
+        '">删除</button>' +
+      '</div></td></tr>';
+  });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+/* 新增/编辑共用一个弹窗：布尔用 select 表达（formModal 已支持，不必为 checkbox 改 core.js）。
+ * 目标模型在新增时由行决定（不用手输，撞不到拼错），编辑时按原值只读展示。 */
+function aliasModal(target, cur) {
+  var it = cur || {};
+  GW.formModal({
+    title: cur ? '编辑别名' : '为模型添加别名',
+    hint: '目标模型：' + target + '。别名仅允许字母、数字与 . _ : / - ，'
+      + '且不能与任何真实模型 ID 撞名。',
+    fields: [
+      { id: 'alias', label: '别名（对外名字）', value: it.alias || '',
+        placeholder: 'nv/kimi-k3' },
+      { id: 'display_name', label: '显示名（可选）', value: it.display_name || '',
+        placeholder: '留空则继承目标模型的显示名' },
+      { id: 'keep_original', label: '列表里保留原名', type: 'select', options: [
+        { value: '0', label: '否 — 别名替换真名（推荐）', selected: !it.keep_original },
+        { value: '1', label: '是 — 别名与真名并存', selected: !!it.keep_original },
+      ] },
+      { id: 'force_mapping', label: '回写响应 model 字段', type: 'select', options: [
+        { value: '1', label: '是 — 响应里也是别名（推荐）',
+          selected: it.force_mapping === undefined ? true : !!it.force_mapping },
+        { value: '0', label: '否 — 响应里保留上游真名',
+          selected: it.force_mapping === undefined ? false : !it.force_mapping },
+      ] },
+      { id: 'remark', label: '备注（可选）', value: it.remark || '' },
+    ],
+    submitText: cur ? '保存' : '添加',
+    onSubmit: async function (v) {
+      if (!v.alias) throw new Error('别名不能为空');
+      var d = await api('/models/alias', {
+        method: 'PUT',
+        body: JSON.stringify({
+          alias: v.alias, target_model: target,
+          display_name: v.display_name || '',
+          keep_original: v.keep_original === '1',
+          force_mapping: v.force_mapping === '1',
+          remark: v.remark || '',
+        }),
+      });
+      GW.toast(d.message || '已保存', 'success');
+      GW.R.models();
+    },
+  });
+}
+
+GW.actions['model-alias'] = function (ds) {
+  var r = (GW.cache.models || [])[parseInt(ds.idx, 10)];
+  if (!r) return;
+  aliasModal(r.model_id, null);
+};
+
+GW.actions['alias-edit'] = function (ds) {
+  var r = (GW.cache.modelAliases || [])[parseInt(ds.idx, 10)];
+  if (!r) return;
+  aliasModal(r.target_model, r);
+};
+
+GW.actions['alias-delete'] = function (ds) {
+  var r = (GW.cache.modelAliases || [])[parseInt(ds.idx, 10)];
+  if (!r) return;
+  GW.confirmModal({
+    title: '删除模型别名',
+    body: '确定删除别名 ' + r.alias + '（→ ' + r.target_model + '）吗？'
+      + '删除后下游只能用真名调用，原先用别名的客户端会收到 400。',
+    danger: true,
+    onConfirm: async function () {
+      var d = await api('/models/alias?alias=' + encodeURIComponent(r.alias), { method: 'DELETE' });
+      GW.toast(d.message || '删除成功', 'success');
+      GW.R.models();
+    },
+  });
+};
 
 /* ================================================================
  *  代理池 — GET/POST /proxies, POST /proxies/bulk,

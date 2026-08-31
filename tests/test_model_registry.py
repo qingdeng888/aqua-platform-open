@@ -10,8 +10,10 @@ hidden_models_block_calls 决定（默认关：仅列表不显示）。
 - all_known_models：含被隐藏项（可见性 ≠ 名称有效性，隐藏不得触发模糊改写）
 - build_admin_rows：来源/状态标记、按 ID 与备注搜索、手动项排在上游项之后
 - is_call_blocked：开关关 → 一律放行；开关开 → 仅拦被隐藏的模型
+- resolve_alias_pure / apply_aliases / build_alias_rows：别名层（改名）纯函数
 - 契约守卫：端点注册与鉴权、删除仅限手动项、取消隐藏不留无信息行、
-  写操作走线程 + 失效缓存 + 落审计、建表与默认设置、路由注册、白名单确已移除
+  写操作走线程 + 失效缓存 + 落审计、建表与默认设置、路由注册、白名单确已移除、
+  别名解析发生在纠错之前、别名不进纠错集合
 """
 import os
 from pathlib import Path
@@ -30,10 +32,13 @@ from app.model_registry import (  # noqa: E402
     VISIBILITY_MAX_IDS,
     _cache,
     all_known_models,
+    apply_aliases,
     apply_overrides,
     build_admin_rows,
+    build_alias_rows,
     is_call_blocked,
     normalize_model_id,
+    resolve_alias_pure,
 )
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -41,6 +46,7 @@ _SRC = (_REPO / "gateway" / "app" / "model_registry.py").read_text(encoding="utf
 _PUBLIC_SRC = (_REPO / "gateway" / "app" / "public_api.py").read_text(encoding="utf-8")
 _DB_SRC = (_REPO / "gateway" / "app" / "database.py").read_text(encoding="utf-8")
 _MAIN_SRC = (_REPO / "gateway" / "app" / "main.py").read_text(encoding="utf-8")
+_TEST_SRC = (_REPO / "gateway" / "app" / "model_test.py").read_text(encoding="utf-8")
 
 _UP = [{"id": "a/one"}, {"id": "b/two"}, {"id": "c/three"}]
 
@@ -48,6 +54,16 @@ _UP = [{"id": "a/one"}, {"id": "b/two"}, {"id": "c/three"}]
 def _ov(**kw):
     """构造一条覆盖项，字段缺省与 _load_snapshot 输出保持一致"""
     it = {"hidden": False, "manual": False, "remark": "", "updated_at": ""}
+    it.update(kw)
+    return it
+
+
+def _al(target, **kw):
+    """构造一条别名项，字段缺省与 _load_snapshot 输出保持一致（force_mapping 默认开）"""
+    it = {
+        "target_model": target, "display_name": "", "keep_original": False,
+        "force_mapping": True, "remark": "", "updated_at": "",
+    }
     it.update(kw)
     return it
 
@@ -176,6 +192,170 @@ class TestBuildAdminRows:
         ov = {"c/three": _ov(hidden=True, remark="上游已弃用")}
         assert [r["model_id"] for r in build_admin_rows(_UP, ov, "弃用")] == ["c/three"]
 
+    def test_rows_carry_aliases(self):
+        al = {"nv/x": _al("b/two"), "nv/y": _al("b/two"), "nv/z": _al("a/one")}
+        rows = {r["model_id"]: r for r in build_admin_rows(_UP, {}, "", al)}
+        assert rows["b/two"]["aliases"] == ["nv/x", "nv/y"]     # 按别名排序，输出稳定
+        assert rows["a/one"]["aliases"] == ["nv/z"]
+        assert rows["c/three"]["aliases"] == []
+
+    def test_search_matches_alias_text(self):
+        al = {"nv/kimi": _al("c/three")}
+        assert [r["model_id"] for r in build_admin_rows(_UP, {}, "kimi", al)] == ["c/three"]
+
+
+class TestResolveAlias:
+    """别名 → 真名：三级确定性匹配，未命中原样返回"""
+
+    _AL = {"nv/kimi-k3": _al("moonshotai/kimi-k3", force_mapping=True)}
+
+    def test_exact_hit(self):
+        assert resolve_alias_pure("nv/kimi-k3", self._AL) == (
+            "moonshotai/kimi-k3", "nv/kimi-k3", True)
+
+    @pytest.mark.parametrize("probe", ["NV/Kimi-K3", "nv/KIMI-K3"])
+    def test_case_insensitive_hit(self, probe):
+        real, used, _ = resolve_alias_pure(probe, self._AL)
+        assert (real, used) == ("moonshotai/kimi-k3", "nv/kimi-k3")
+
+    @pytest.mark.parametrize("probe", ["nv_kimi_k3", "NVKimiK3", "nv.kimi.k3"])
+    def test_normalized_hit(self, probe):
+        # 与 request_validator._normalize 同规则：去掉所有非字母数字后比对
+        real, used, _ = resolve_alias_pure(probe, self._AL)
+        assert (real, used) == ("moonshotai/kimi-k3", "nv/kimi-k3")
+
+    def test_whitespace_trimmed(self):
+        assert resolve_alias_pure("  nv/kimi-k3 ", self._AL)[0] == "moonshotai/kimi-k3"
+
+    @pytest.mark.parametrize("probe", ["moonshotai/kimi-k3", "other/model", "nv/kimi-k9"])
+    def test_miss_returns_input_unchanged(self, probe):
+        assert resolve_alias_pure(probe, self._AL) == (probe, "", False)
+
+    @pytest.mark.parametrize("aliases", [None, {}])
+    def test_no_aliases_is_passthrough(self, aliases):
+        assert resolve_alias_pure("a/one", aliases) == ("a/one", "", False)
+
+    @pytest.mark.parametrize("probe", ["", "   ", None])
+    def test_empty_input(self, probe):
+        real, used, force = resolve_alias_pure(probe, self._AL)
+        assert (used, force) == ("", False) and not real
+
+    def test_force_mapping_passthrough(self):
+        al = {"nv/x": _al("a/one", force_mapping=False)}
+        assert resolve_alias_pure("nv/x", al) == ("a/one", "nv/x", False)
+
+    def test_alias_without_target_ignored(self):
+        # 脏数据（target 为空）不该把请求打到空模型名上
+        assert resolve_alias_pure("nv/x", {"nv/x": _al("")}) == ("nv/x", "", False)
+
+    def test_multiple_aliases_same_target(self):
+        al = {"nv/a": _al("a/one"), "nv/b": _al("a/one")}
+        assert resolve_alias_pure("nv/b", al)[:2] == ("a/one", "nv/b")
+
+
+class TestApplyAliases:
+    """可见列表 → 对外列表：默认替换真名，keep_original 则并存"""
+
+    def test_no_aliases_is_passthrough(self):
+        for al in (None, {}):
+            assert apply_aliases(_UP, al) == _UP
+
+    def test_alias_replaces_real_name(self):
+        out = apply_aliases(_UP, {"nv/x": _al("b/two")})
+        assert [m["id"] for m in out] == ["a/one", "nv/x", "c/three"]
+
+    def test_keep_original_lists_both(self):
+        out = apply_aliases(_UP, {"nv/x": _al("b/two", keep_original=True)})
+        assert [m["id"] for m in out] == ["a/one", "b/two", "nv/x", "c/three"]
+
+    def test_keep_original_is_or_across_aliases(self):
+        # 同一 target 多条别名：任一条要求保留就保留（保留是更安全的一侧）
+        al = {"nv/x": _al("b/two"), "nv/y": _al("b/two", keep_original=True)}
+        assert [m["id"] for m in apply_aliases(_UP, al)] == [
+            "a/one", "b/two", "nv/x", "nv/y", "c/three"]
+
+    def test_multiple_aliases_sorted_and_in_place(self):
+        al = {"nv/z": _al("b/two"), "nv/a": _al("b/two")}
+        assert [m["id"] for m in apply_aliases(_UP, al)] == ["a/one", "nv/a", "nv/z", "c/three"]
+
+    def test_owned_by_takes_provider_segment(self):
+        out = apply_aliases([{"id": "b/two", "owned_by": "moonshotai"}], {"nv/x": _al("b/two")})
+        assert out[0]["owned_by"] == "nv"
+
+    def test_owned_by_kept_when_alias_has_no_slash(self):
+        out = apply_aliases([{"id": "b/two", "owned_by": "moonshotai"}], {"kimi": _al("b/two")})
+        assert out[0]["owned_by"] == "moonshotai"
+
+    def test_other_fields_inherited(self):
+        src = [{"id": "b/two", "object": "model", "created": 123, "context_length": 8192}]
+        out = apply_aliases(src, {"nv/x": _al("b/two")})
+        assert out[0]["created"] == 123 and out[0]["context_length"] == 8192
+
+    def test_display_name_applied(self):
+        out = apply_aliases([{"id": "b/two"}], {"nv/x": _al("b/two", display_name="Kimi K3")})
+        assert out[0]["display_name"] == "Kimi K3"
+
+    def test_original_entry_not_mutated(self):
+        src = [{"id": "b/two", "owned_by": "moonshotai"}]
+        apply_aliases(src, {"nv/x": _al("b/two", display_name="X")})
+        assert src[0] == {"id": "b/two", "owned_by": "moonshotai"}
+
+    def test_hidden_target_suppresses_alias_entry(self):
+        # 隐藏语义优先：target 已被覆盖层剔除，其别名条目也不该出现
+        visible = apply_overrides(_UP, {"b/two": _ov(hidden=True)})
+        out = apply_aliases(visible, {"nv/x": _al("b/two")})
+        assert [m["id"] for m in out] == ["a/one", "c/three"]
+
+    def test_alias_to_unknown_target_not_listed(self):
+        assert [m["id"] for m in apply_aliases(_UP, {"nv/x": _al("nope/x")})] == [
+            "a/one", "b/two", "c/three"]
+
+    def test_dirty_entries_skipped(self):
+        dirty = [{"id": "a/one"}, {"id": ""}, {"no_id": 1}, "s", None]
+        assert [m["id"] for m in apply_aliases(dirty, {"nv/x": _al("a/one")})] == ["nv/x"]
+
+    def test_alias_with_empty_target_ignored(self):
+        assert apply_aliases(_UP, {"nv/x": _al("")}) == _UP
+
+
+class TestBuildAliasRows:
+    _AL = {
+        "nv/b": _al("b/two", remark="改名对外"),
+        "nv/a": _al("a/one", display_name="One", keep_original=True, force_mapping=False),
+    }
+
+    def test_sorted_by_alias(self):
+        assert [r["alias"] for r in build_alias_rows(self._AL)] == ["nv/a", "nv/b"]
+
+    def test_row_shape(self):
+        r = build_alias_rows(self._AL)[0]
+        assert r["target_model"] == "a/one" and r["display_name"] == "One"
+        assert r["keep_original"] is True and r["force_mapping"] is False
+
+    def test_target_missing_flag(self):
+        known = {"b/two"}
+        rows = {r["alias"]: r for r in build_alias_rows(self._AL, known)}
+        assert rows["nv/a"]["target_missing"] is True
+        assert rows["nv/b"]["target_missing"] is False
+
+    def test_target_missing_false_when_known_not_given(self):
+        assert all(r["target_missing"] is False for r in build_alias_rows(self._AL))
+
+    @pytest.mark.parametrize("kw,expect", [
+        ("nv/a", ["nv/a"]),
+        ("NV/A", ["nv/a"]),
+        ("b/two", ["nv/b"]),          # 命中目标模型
+        ("改名", ["nv/b"]),            # 命中备注
+        ("nomatch", []),
+        ("", ["nv/a", "nv/b"]),
+    ])
+    def test_search(self, kw, expect):
+        assert [r["alias"] for r in build_alias_rows(self._AL, None, kw)] == expect
+
+    @pytest.mark.parametrize("aliases", [None, {}])
+    def test_empty(self, aliases):
+        assert build_alias_rows(aliases) == []
+
 
 class TestIsCallBlocked:
     """开关语义：关=仅列表不显示（放行调用）；开=隐藏的模型返回 400"""
@@ -183,11 +363,13 @@ class TestIsCallBlocked:
     def _seed(self, overrides, block):
         import time
         _cache["overrides"] = overrides
+        _cache["aliases"] = {}                    # get_snapshot 现在返回三元组
         _cache["block"] = block
         _cache["expires"] = time.time() + 300     # 快照未过期，不会触发查库
 
     def teardown_method(self):
         _cache["overrides"] = None
+        _cache["aliases"] = {}
         _cache["block"] = False
         _cache["expires"] = 0.0
 
@@ -229,6 +411,8 @@ class TestContract:
         ('@router.delete("/models", tags=["管理员"])', "delete_manual_model"),
         ('@router.put("/models/visibility", tags=["管理员"])', "set_models_visibility"),
         ('@router.put("/models/block-setting", tags=["管理员"])', "set_block_setting"),
+        ('@router.put("/models/alias", tags=["管理员"])', "set_model_alias"),
+        ('@router.delete("/models/alias", tags=["管理员"])', "delete_model_alias"),
     ])
     def test_endpoints_registered_and_require_admin(self, decorator, fn):
         assert decorator in _SRC
@@ -259,6 +443,7 @@ class TestContract:
 
     @pytest.mark.parametrize("fn", [
         "add_manual_model", "delete_manual_model", "set_models_visibility", "set_block_setting",
+        "set_model_alias", "delete_model_alias",
     ])
     def test_writes_run_in_thread_and_invalidate_cache(self, fn):
         body = self._body(fn)
@@ -270,9 +455,39 @@ class TestContract:
         ("delete_manual_model", "insert_audit("),
         ("set_models_visibility", "insert_audit_many("),
         ("set_block_setting", "insert_audit("),
+        ("set_model_alias", "insert_audit("),
+        ("delete_model_alias", "insert_audit("),
     ])
     def test_writes_are_audited(self, fn, audit):
         assert audit in self._body(fn)
+
+    def test_alias_write_validation_order(self):
+        # 校验顺序：字符合法 → alias ≠ target → 撞名 → target 存在。
+        # 顺序错了会先报「目标不存在」这种误导性错误
+        body = self._body("set_model_alias")
+        for code in ("invalid_model_id", "alias_equals_target",
+                     "alias_conflicts_model", "target_not_found"):
+            assert f'"code": "{code}"' in body
+        assert (body.index("alias_equals_target") < body.index("alias_conflicts_model")
+                < body.index("target_not_found"))
+
+    def test_alias_conflict_checked_against_all_known_models(self):
+        # 撞名与 target 存在性都对照「真实存在」全量集合（含被隐藏项），不能只看可见列表
+        body = self._body("_known_model_ids")
+        assert "all_known_models(upstream, overrides)" in body
+        assert "await _known_model_ids()" in self._body("set_model_alias")
+
+    def test_alias_upsert_and_case_insensitive_unique(self):
+        body = self._body("set_model_alias")
+        assert "ON CONFLICT (alias) DO UPDATE SET" in body
+        # 只改大小写视作同一条别名：先删旧写法，否则 lower(alias) 唯一索引会冲突成 500
+        assert "DELETE FROM model_aliases WHERE lower(alias) = lower(%s) AND alias <> %s" in body
+
+    def test_alias_delete_is_case_insensitive_and_404(self):
+        body = self._body("delete_model_alias")
+        assert "DELETE FROM model_aliases WHERE lower(alias) = lower(%s)" in body
+        assert '"code": "alias_not_found"' in body
+        assert "status_code=404" in body
 
     def test_snapshot_read_needs_no_decryption(self):
         # 覆盖表全字段明文，读取不该出现解密（与上游密钥查重形成对照）
@@ -286,9 +501,29 @@ class TestContract:
         assert "CREATE TABLE IF NOT EXISTS model_overrides" in _DB_SRC
         assert "idx_model_overrides_hidden" in _DB_SRC
 
+    def test_alias_table_created_with_lower_unique_index(self):
+        assert "CREATE TABLE IF NOT EXISTS model_aliases" in _DB_SRC
+        # 解析大小写不敏感，若允许 NV/x 与 nv/x 并存，解析结果就不确定
+        assert ("CREATE UNIQUE INDEX IF NOT EXISTS idx_model_aliases_lower "
+                "ON model_aliases (lower(alias))") in _DB_SRC
+        assert "idx_model_aliases_target" in _DB_SRC
+
+    def test_alias_defaults_match_cliproxyapi_mapping(self):
+        # fork → keep_original 默认关（别名替换真名）；force-mapping → 默认开（响应回写别名）
+        assert "keep_original: bool = False" in _SRC
+        assert "force_mapping: bool = True" in _SRC
+
 
 class TestPublicApiContract:
     """白名单下线后的取数链契约"""
+
+    @staticmethod
+    def _chat_body() -> str:
+        """chat_completions 函数体（切到下一个顶层定义，避免误把后文算进来）"""
+        import re
+        rest = _PUBLIC_SRC.split("async def chat_completions(")[1]
+        m = re.search(r"\n(?:@router\.|async def |def )", rest)
+        return rest[: m.start()] if m else rest
 
     def test_whitelist_removed(self):
         assert "_VERIFIED_WORKING_MODELS" not in _PUBLIC_SRC
@@ -305,6 +540,86 @@ class TestPublicApiContract:
         assert "apply_overrides(raw, overrides)" in body
         assert "refresh_verified_models(all_known_models(raw, overrides))" in body
 
+    def test_alias_layer_sits_after_override_layer(self):
+        body = _PUBLIC_SRC.split("async def get_model_list(")[1].split("\n\n\n")[0]
+        assert "apply_aliases(apply_overrides(raw, overrides), aliases)" in body
+
+    def test_aliases_never_enter_corrector_set(self):
+        # 纠错返回值会直接写进 body["model"]，别名一旦进纠错集合就可能被模糊匹配成别名
+        # 再原样发给上游 → 404。纠错集合只吃真名。
+        body = _PUBLIC_SRC.split("async def get_model_list(")[1].split("\n\n\n")[0]
+        assert "refresh_verified_models(apply_aliases" not in body
+        assert "refresh_verified_models(all_known_models(raw, overrides))" in body
+        assert _PUBLIC_SRC.count("refresh_verified_models(") == 1
+
+    def test_alias_resolved_before_corrector(self):
+        # 解析必须发生在纠错之前（源码下标断言先后）
+        body = self._chat_body()
+        i_resolve = body.index("await resolve_alias(model)")
+        i_correct = body.index("validate_and_correct_model(model)")
+        assert i_resolve < i_correct
+
+    def test_alias_resolution_rewrites_body_model(self):
+        # 全链路只用真名：熔断器 key、调度分桶、请求日志都吃 body["model"]
+        body = self._chat_body()
+        assert 'body["model"] = real_model' in body
+        assert "model = real_model" in body
+        assert 'alias_out = alias_used if (alias_used and force_map) else ""' in body
+
+    def test_alias_out_threaded_to_handlers(self):
+        assert "alias_out=alias_out" in _PUBLIC_SRC
+        for fn in ("_handle_stream_request", "_handle_nonstream_request"):
+            body = _PUBLIC_SRC.split(f"async def {fn}(")[1].split("\n\n\n")[0]
+            assert 'alias_out: str = ""' in body
+
+    def test_stream_rewrite_inside_json_success_branch(self):
+        # 回写只能落在 json.loads 成功分支内，非 JSON 行必须原样透传
+        body = _PUBLIC_SRC.split("async def _handle_stream_request(")[1].split("\n\n\n")[0]
+        i_load = body.index("data = json.loads(line[6:])")
+        i_rewrite = body.index('data["model"] = alias_out')
+        i_except = body.index("except json.JSONDecodeError:")
+        assert i_load < i_rewrite < i_except
+
+    def test_nonstream_rewrite_before_logging(self):
+        # 日志里的 response_body 要与下游实际收到的一致
+        body = _PUBLIC_SRC.split("async def _handle_nonstream_request(")[1].split("\n\n\n")[0]
+        assert body.index('data["model"] = alias_out') < body.index("_log_request(")
+
+    def test_embeddings_resolves_alias(self):
+        # 本端点没有纠错步骤，别名不解析就会被原样发给上游 → 404
+        body = _PUBLIC_SRC.split("async def embeddings(")[1].split("\n\n\n")[0]
+        assert "await resolve_alias(model)" in body
+        assert "alias_out=alias_out" in body
+        emb = _PUBLIC_SRC.split("async def _call_upstream_embeddings(")[1].split("\n\n\n")[0]
+        assert 'data["model"] = alias_out' in emb
+
+    def test_known_check_uses_all_known_models(self):
+        # 对照可见列表会把「被隐藏」和「被别名替换掉的真名」都误报成未知模型
+        body = self._chat_body()
+        assert "all_known_models(await fetch_upstream_models(), await get_overrides())" in body
+
+    def test_enrich_looks_up_catalog_by_real_name(self):
+        # 别名条目要能继承真模型的目录元数据；管理员填的 display_name 优先
+        body = _PUBLIC_SRC.split("def _enrich_model_list(")[1].split("\n\n\n")[0]
+        assert "alias_real_map()" in body
+        assert "lookup_id = alias_real.get(model_id) or model_id" in body
+        assert "NIM_MODEL_CATALOG.get(lookup_id)" in body
+        assert "if custom_display_name:" in body
+
+    def test_probe_resolves_alias_before_direct_upstream_call(self):
+        # 模型测试页的列表与下游一致（可能是别名），而 probe 直连上游
+        body = _TEST_SRC.split("async def probe_model(")[1].split("\n\n\n")[0]
+        assert "await resolve_alias(model)" in body
+        assert '"model": real_model' in body
+        assert '"upstream_model": real_model' in body
+
+    def test_chat_path_blocks_disabled_model(self):
+        assert "if await is_call_blocked(model):" in _PUBLIC_SRC
+        assert '"code": "model_disabled",' in _PUBLIC_SRC
+        # 判定发生在别名解析之后，入参已是真名——用别名调用绕不过「隐藏即禁用」
+        body = self._chat_body()
+        assert body.index("await resolve_alias(model)") < body.index("await is_call_blocked(model)")
+
     def test_public_endpoints_use_override_layer(self):
         # /v1/models 与 /api/v1/models 共用 list_models（双装饰器），/api/public/models 独立一份，
         # 三个对外路径都必须取覆盖层结果，不能直接拿上游全量
@@ -314,10 +629,6 @@ class TestPublicApiContract:
             body = _PUBLIC_SRC.split(f"async def {fn}(")[1].split("\n\n\n")[0]
             assert "models = await get_model_list()" in body
             assert "fetch_upstream_models()" not in body
-
-    def test_chat_path_blocks_disabled_model(self):
-        assert "if await is_call_blocked(model):" in _PUBLIC_SRC
-        assert '"code": "model_disabled",' in _PUBLIC_SRC
 
     def test_unknown_model_still_forwarded(self):
         # 上游随时可能上新模型：名字不在列表里只记日志，不拦截
