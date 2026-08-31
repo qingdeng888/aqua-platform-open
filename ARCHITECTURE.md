@@ -1,7 +1,7 @@
 # AQUA Gateway v12.0 — 项目架构文档
 
 > **版本**: v12.0（纯中转网关形态，单服务）
-> **最后更新**: 2026-08-29
+> **最后更新**: 2026-08-31
 > **语言**: 中文（简体）
 
 ---
@@ -1100,7 +1100,7 @@ Gateway 实现了**6 维度商用检测**体系，识别可能将免费 API 用�
 |----------|----------|------|
 | **认证** | `POST /gw/admin/login` | 管理员密码校验 → 签发 24h HMAC Admin Token（写入 cookie） |
 | **上游密钥** | `/gw/admin/upstreams`、`/upstreams/bulk`、`/upstreams/{id}/reveal`、`/upstreams/health-check` | 上游密钥 CRUD、批量添加（每行一个密钥、自动命名）、明文 reveal、启停、探活、解冻、出网模式绑定 |
-| **代理池** | `/gw/admin/proxies`、`/proxies/bulk`、`/proxies/{id}`、`/proxies/{id}/test` | 代理 CRUD（socks5/socks5h/http/https，无认证或账号密码）、批量添加（每行一个 `协议://[用户名:密码@]地址:端口`、自动命名）、启停、连通性测试 |
+| **代理池** | `/gw/admin/proxies`、`/proxies/bulk`、`/proxies/status`、`/proxies/{id}`、`/proxies/{id}/test` | 代理 CRUD（socks5/socks5h/http/https，无认证或账号密码）、批量添加（每行一个 `协议://[用户名:密码@]地址:端口`、自动命名）、批量启停（勾选后一次 UPDATE）、单个启停、连通性测试 |
 | **下游客户** | `/gw/admin/clients`、`/clients/{id}/keys`、`/clients/{id}/keys/{kid}/reveal` | 客户与密钥 CRUD、签发/吊销、明文 reveal、用量查询 |
 | **桶监控** | `/gw/admin/buckets`、`/buckets/{key_id}/{model}/unfreeze` | 桶状态查看、RPM/TPM 统计、手动解冻 |
 | **算法** | `/gw/admin/algorithms/realtime`、`/algorithm-stats`、`/algorithm/{num}` | 17 算法实时状态、统计与单算法详情 |
@@ -1385,7 +1385,7 @@ curl -X POST http://localhost:8000/gw/admin/maintenance \
 | NIM模型目录 | `GET /gw/admin/nim/models` | 可用模型与能力 |
 | 解冻桶/密钥 | `POST /gw/admin/buckets/{key_id}/{model}/unfreeze`、`/upstreams/{key_id}/unfreeze` | 手动解除冷却/冻结 |
 | 熔断器重置 | `POST /gw/admin/circuit-breakers/reset` | 手动复位熔断状态 |
-| 代理池管理 | `/gw/admin/proxies`、`POST /proxies/bulk`、`POST /proxies/{id}/test` | 代理增删改查、批量添加、启停与连通性测试 |
+| 代理池管理 | `/gw/admin/proxies`、`POST /proxies/bulk`、`PUT /proxies/status`、`POST /proxies/{id}/test` | 代理增删改查、批量添加、批量启停、单个启停与连通性测试 |
 | 清理请求日志 | `DELETE /gw/admin/request-logs/cleanup?days=N` | 手动清理（另有每 6 小时自动任务） |
 | 数据库管理 | `/gw/dbadmin` | SQLAdmin CRUD |
 
@@ -1485,10 +1485,40 @@ proxies                                upstream_keys（v12.1 迁移新增两列�
 | 审计 | 一代理一行，经 `insert_audit_many()` 一次往返写入，保留 `target_id` 可追溯性 |
 | 响应 | 行号 / id / 名称 / 协议 / 地址 / 端口 / 用户名 / `has_auth`，**不含密码**；单次上限 `BULK_MAX_LINES = 200` |
 
-### 12.7 依赖
+### 12.7 勾选批量操作（批量启停 / 批量测试）
+
+控制台代理表带勾选列，勾选后可批量测试、批量启用、批量停用。两类操作**刻意落在不同的层**：
+
+| 操作 | 落点 | 为什么 |
+|------|------|--------|
+| 批量启用 / 停用 | **新后端端点** `PUT /gw/admin/proxies/status` | 状态变更要原子、要留审计、要一次失效快照。浏览器循环打 N 次 `PUT /proxies/{id}` 会产生 N 次快照失效与 N 条独立写事务，中途失败还会留下半改状态 |
+| 批量测试 | **纯前端编排**，复用 `POST /gw/admin/proxies/{id}/test` | 单次探测默认 10s 超时。服务端串行 N 个 = 请求挂到 10N 秒且全程无进度、无法中止；放在浏览器端可以逐行出结果、显示进度、随时中止 |
+
+`PUT /proxies/status` 的实现口径与 §模型可见性的 `PUT /models/visibility` 对齐：
+
+| 环节 | 实现要点 |
+|------|---------|
+| 路由顺序 | **必须注册在 `PUT /proxies/{proxy_id}` 之前**。同一 HTTP 方法下 FastAPI 按注册顺序匹配，反了的话 `"status"` 会被当成 `proxy_id` 吞掉。有 pytest 契约按源码下标断言先后 |
+| 入参清洗 | `proxy_ids` 去重保序、空列表 400、超过 `BULK_MAX_LINES`(200) 400；`status` 只收 `active` / `inactive` |
+| 差量写入 | 先 `SELECT id, name, status FROM proxies WHERE id = ANY(%s)` 算出 `missing`（已不存在的 ID 数），再**只写状态确实需要变的行**——已是目标态的既不写库也不记审计，响应 `changed` 因此是真实变更数而非请求数 |
+| 写入 | 一条 `UPDATE proxies SET status=%s, updated_at=%s WHERE id = ANY(%s)` 与 `insert_audit_many()` 同在一个 `asyncio.to_thread(_write)` 内，写完 `proxy_pool.invalidate()` 让 5 秒快照立即失效 |
+| 并存 | 单个启停/编辑仍走 `PUT /proxies/{proxy_id}`（该路径同时承担编辑），由源码契约测试锁定不被替换 |
+
+前端编排（`gateway/app/static/js/console/pages-data.js`）：
+
+| 关注点 | 做法 |
+|--------|------|
+| 勾选态 | 模块级 `proxySel = { 代理ID: true }`，跨表格重绘保持；每次进页面按最新列表剔除已删除的 ID，避免批量请求带上不存在的代理 |
+| 一键全选 | 表头 checkbox 带 `data-all`，三态由 `checked` + `indeterminate` 表达；另有「全选 / 清空勾选」按钮。全选**直接改现有 checkbox 而不重画表格**——重画会抹掉正在跑的行内测试状态 |
+| 事件绑定 | 勾选走容器上的一个 `change` 委托（重绘只换容器 `innerHTML`，监听不丢），与全局 `data-act` 点击委托互不干扰 |
+| 并发池 | `PROXY_TEST_CONC = 4` 个 worker 轮取 `queue.shift()`，复用「模型测试」页那套编排；`AbortController` 既取消在途请求，也让未开始的行标为「已中止」 |
+| 收手条件 | 每轮循环检查 `GW.$('proxyTableWrap')` 是否还在——页面被切走就主动 `abort()` 并停止，不再继续打代理；最终 UI 更新前再检查一次 DOM |
+| XSS | 行 `data-pid` 与 checkbox 的值经 `esc()` 输出；行内结果的 badge 来自静态映射表，后端返回的探测文案经 `textContent` 追加 |
+
+### 12.8 依赖
 
 SOCKS 支持来自 `httpx[socks]`（`socksio`），已声明于 `gateway/requirements.txt`。`httpx` 0.28 使用单数 `proxy=` 参数（`proxies=` 已移除），协议白名单为 `http` / `https` / `socks5` / `socks5h`。
 
 ---
 
-> **文档版本**: v12.1 | **最后更新**: 2026-08-29 | **AQUA Gateway**
+> **文档版本**: v12.1 | **最后更新**: 2026-08-31 | **AQUA Gateway**

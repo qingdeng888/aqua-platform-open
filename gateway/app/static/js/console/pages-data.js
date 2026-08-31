@@ -774,9 +774,16 @@ GW.actions['alias-delete'] = function (ds) {
 };
 
 /* ================================================================
- *  代理池 — GET/POST /proxies, POST /proxies/bulk,
+ *  代理池 — GET/POST /proxies, POST /proxies/bulk, PUT /proxies/status,
  *           PUT/DELETE /proxies/{id}, POST /proxies/{id}/test
+ *
+ *  多选：勾选态跨局部重绘保持（行 checkbox 带 data-pid，表头全选带 data-all），
+ *  批量测试沿用模型测试页那套「并发池 + AbortController」，逐行就地更新探测结果。
  * ================================================================ */
+var proxySel = {};                          // { 代理ID: true } 勾选态，跨重绘保持
+var PT = { running: false, abort: null, rows: {} };   // 批量测试运行态与行引用
+var PROXY_TEST_CONC = 4;                    // 批量测试并发数：探测默认 10s 超时，4 路够快也不打爆代理
+
 GW.R.proxies = async function () {
   var c = GW.$('content');
   c.innerHTML = GW.spinner();
@@ -789,6 +796,11 @@ GW.R.proxies = async function () {
     var list = (d && d.proxies) || [];
     var rt = (d && d.runtime) || {};
     GW.cache.proxies = list;
+    PT.rows = {};
+    // 已删除的代理不能残留在勾选集里，否则批量操作会带上不存在的 ID
+    var alive = {};
+    list.forEach(function (p) { alive[p.id] = true; });
+    Object.keys(proxySel).forEach(function (id) { if (!alive[id]) delete proxySel[id]; });
     c.innerHTML = '';
 
     // 活跃代理以库内 status 为准：运行时快照是惰性加载的，冷启动时为 0（snapshot_age=-1），不能当作真值
@@ -806,49 +818,160 @@ GW.R.proxies = async function () {
     ]));
 
     if (!list.length) {
+      proxySel = {};
       c.insertAdjacentHTML('beforeend', GW.emptyState('代理池为空，点击右上角「添加代理」录入 SOCKS5 / HTTP 代理（也可「批量添加」粘贴多行）', '🌐'));
       return;
     }
 
+    c.appendChild(buildProxyBulkBar());
     var wrap = document.createElement('div');
     wrap.className = 'table-wrap card';
-    var html = '<table><thead><tr><th>名称</th><th>协议</th><th>地址</th><th>认证</th><th>绑定密钥</th><th>状态</th><th>最近探测</th><th>操作</th></tr></thead><tbody>';
-    list.forEach(function (p, i) {
-      var st = p.status === 'active' ? badge('启用', 'green') : badge('停用', 'gray');
-      var auth = p.has_auth ? badge('账号密码', 'blue') : badge('无认证', 'gray');
-      var chk = '-';
-      if (p.last_check_at) {
-        chk = (p.last_check_ok ? badge('通', 'green') : badge('不通', 'red')) +
-          ' <span class="text-sm">' + esc(GW.fmtTime(p.last_check_at)) + '</span>';
-      }
-      html += '<tr>' +
-        '<td class="wrap-cell"><strong>' + esc(p.name || '-') + '</strong>' +
-        (p.remark ? '<div class="text-sm">' + esc(p.remark) + '</div>' : '') + '</td>' +
-        '<td>' + esc(p.scheme || '-') + '</td>' +
-        '<td class="mono text-sm">' + esc(p.host || '-') + ':' + esc(p.port) + '</td>' +
-        '<td>' + auth + (p.username ? ' <span class="mono text-sm">' + esc(p.username) + '</span>' : '') + '</td>' +
-        '<td>' + GW.fmtNum(p.bound_keys || 0) + '</td>' +
-        '<td>' + st + '</td>' +
-        '<td>' + chk + '</td>' +
-        '<td><div class="cell-actions">' +
-        '<button class="btn btn-sm" data-act="proxy-test" data-id="' + esc(p.id) + '">测试</button>' +
-        '<button class="btn btn-sm" data-act="proxy-edit" data-idx="' + i + '">编辑</button>' +
-        '<button class="btn btn-sm" data-act="proxy-toggle" data-idx="' + i + '">' + (p.status === 'active' ? '停用' : '启用') + '</button>' +
-        '<button class="btn btn-sm btn-danger" data-act="proxy-delete" data-idx="' + i + '">删除</button>' +
-        '</div></td></tr>';
-    });
-    html += '</tbody></table>';
-    wrap.innerHTML = html;
+    wrap.id = 'proxyTableWrap';
     c.appendChild(wrap);
 
     var tip = document.createElement('p');
     tip.className = 'form-hint';
-    tip.textContent = '代理密码加密存储、永不回显；删除代理会把绑定它的上游密钥自动回退为直连。';
+    tip.textContent = '代理密码加密存储、永不回显；删除代理会把绑定它的上游密钥自动回退为直连。'
+      + '勾选后可批量测试 / 启用 / 停用；批量测试并发 ' + PROXY_TEST_CONC + '，可随时中止。';
     c.appendChild(tip);
+
+    paintProxyTable();
+    // 勾选走 change 委托：重绘只换容器 innerHTML，绑在容器上的监听不会丢
+    wrap.addEventListener('change', function (e) {
+      var cb = e.target;
+      if (!cb || cb.type !== 'checkbox') return;
+      if (cb.hasAttribute('data-all')) { setAllProxyChecked(cb.checked); return; }
+      if (!cb.dataset.pid) return;
+      if (cb.checked) proxySel[cb.dataset.pid] = true;
+      else delete proxySel[cb.dataset.pid];
+      syncProxySelUI();
+    });
   } catch (e) {
     c.innerHTML = GW.errorCard(e.message);
   }
 };
+
+/* 批量操作栏：全选/清空 + 已选计数 + 批量测试/启用/停用 + 中止 */
+function buildProxyBulkBar() {
+  var bar = document.createElement('div');
+  bar.className = 'filter-bar';
+  bar.innerHTML =
+    '<button class="btn btn-sm" data-act="proxy-sel-all">全选</button>' +
+    '<button class="btn btn-sm" data-act="proxy-sel-none">清空勾选</button>' +
+    '<span class="text-sm text-dim" id="proxySelCount"></span>' +
+    '<button class="btn btn-sm" data-act="proxy-bulk-test" id="proxyBulkTest">&#128268; 测试选中</button>' +
+    '<button class="btn btn-sm" data-act="proxy-bulk-enable" id="proxyBulkEnable">启用选中</button>' +
+    '<button class="btn btn-sm btn-danger" data-act="proxy-bulk-disable" id="proxyBulkDisable">停用选中</button>' +
+    '<button class="btn btn-sm" data-act="proxy-bulk-abort" id="proxyBulkAbort" disabled>中止</button>' +
+    '<span class="text-sm text-dim" id="proxyBulkInfo"></span>';
+  return bar;
+}
+
+/* 只重画表格：勾选态由 proxySel 恢复，行引用存进 PT.rows 供就地更新探测结果 */
+function paintProxyTable() {
+  var wrap = GW.$('proxyTableWrap');
+  if (!wrap) return;
+  var list = GW.cache.proxies || [];
+  var html = '<table><thead><tr><th style="width:34px"><input type="checkbox" data-all="1"></th>' +
+    '<th>名称</th><th>协议</th><th>地址</th><th>认证</th><th>绑定密钥</th>' +
+    '<th>状态</th><th>最近探测</th><th>操作</th></tr></thead><tbody>';
+  list.forEach(function (p, i) {
+    var st = p.status === 'active' ? badge('启用', 'green') : badge('停用', 'gray');
+    var auth = p.has_auth ? badge('账号密码', 'blue') : badge('无认证', 'gray');
+    var chk = '-';
+    if (p.last_check_at) {
+      chk = (p.last_check_ok ? badge('通', 'green') : badge('不通', 'red')) +
+        ' <span class="text-sm">' + esc(GW.fmtTime(p.last_check_at)) + '</span>';
+    }
+    html += '<tr data-pid="' + esc(p.id) + '">' +
+      '<td><input type="checkbox" data-pid="' + esc(p.id) + '"' +
+        (proxySel[p.id] ? ' checked' : '') + '></td>' +
+      '<td class="wrap-cell"><strong>' + esc(p.name || '-') + '</strong>' +
+      (p.remark ? '<div class="text-sm">' + esc(p.remark) + '</div>' : '') + '</td>' +
+      '<td>' + esc(p.scheme || '-') + '</td>' +
+      '<td class="mono text-sm">' + esc(p.host || '-') + ':' + esc(p.port) + '</td>' +
+      '<td>' + auth + (p.username ? ' <span class="mono text-sm">' + esc(p.username) + '</span>' : '') + '</td>' +
+      '<td>' + GW.fmtNum(p.bound_keys || 0) + '</td>' +
+      '<td>' + st + '</td>' +
+      '<td data-col="chk">' + chk + '</td>' +
+      '<td><div class="cell-actions">' +
+      '<button class="btn btn-sm" data-act="proxy-test" data-id="' + esc(p.id) + '">测试</button>' +
+      '<button class="btn btn-sm" data-act="proxy-edit" data-idx="' + i + '">编辑</button>' +
+      '<button class="btn btn-sm" data-act="proxy-toggle" data-idx="' + i + '">' + (p.status === 'active' ? '停用' : '启用') + '</button>' +
+      '<button class="btn btn-sm btn-danger" data-act="proxy-delete" data-idx="' + i + '">删除</button>' +
+      '</div></td></tr>';
+  });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+  PT.rows = {};
+  wrap.querySelectorAll('tr[data-pid]').forEach(function (tr) {
+    PT.rows[tr.getAttribute('data-pid')] = tr;
+  });
+  syncProxySelUI();
+}
+
+/* 勾选态辅助：ID 顺序始终跟随表格，避免批量操作顺序与界面不一致 */
+function selectedProxies() {
+  return (GW.cache.proxies || []).filter(function (p) { return proxySel[p.id]; });
+}
+
+// 直接改现有 checkbox 而不重画表格：批量测试进行中的行内状态不会被抹掉
+function setAllProxyChecked(on) {
+  var wrap = GW.$('proxyTableWrap');
+  if (!wrap) return;
+  wrap.querySelectorAll('input[type="checkbox"][data-pid]').forEach(function (cb) {
+    cb.checked = on;
+    if (on) proxySel[cb.dataset.pid] = true;
+    else delete proxySel[cb.dataset.pid];
+  });
+  syncProxySelUI();
+}
+
+/* 已选计数、表头全选的三态（全选/半选/未选）、批量按钮可用性 */
+function syncProxySelUI() {
+  var total = (GW.cache.proxies || []).length;
+  var sel = selectedProxies().length;
+  var cnt = GW.$('proxySelCount');
+  if (cnt) cnt.textContent = '已选 ' + sel + ' / 共 ' + total + ' 个';
+  var wrap = GW.$('proxyTableWrap');
+  var all = wrap && wrap.querySelector('input[type="checkbox"][data-all]');
+  if (all) {
+    all.checked = total > 0 && sel === total;
+    all.indeterminate = sel > 0 && sel < total;
+  }
+  ['proxyBulkTest', 'proxyBulkEnable', 'proxyBulkDisable'].forEach(function (id) {
+    var b = GW.$(id);
+    if (b) b.disabled = PT.running || sel === 0;
+  });
+}
+
+// 批量测试运行态：只切按钮可用性，不动表格
+function setProxyBulkRunning(on) {
+  PT.running = on;
+  var ab = GW.$('proxyBulkAbort');
+  if (ab) ab.disabled = !on;
+  syncProxySelUI();
+}
+
+/* 就地更新单行「最近探测」列：badge 用静态映射走 innerHTML，后端文案走 textContent */
+function setProxyCheck(id, state, msg) {
+  var tr = PT.rows[id];
+  if (!tr) return;
+  var td = tr.querySelector('[data-col="chk"]');
+  if (!td) return;
+  var map = {
+    pending: ['排队中', 'gray'], running: ['测试中', 'yellow'],
+    ok: ['通', 'green'], fail: ['不通', 'red'], abort: ['已中止', 'gray'],
+  };
+  var m = map[state] || map.pending;
+  td.innerHTML = badge(m[0], m[1]);
+  if (msg) {
+    var s = document.createElement('span');
+    s.className = 'text-sm';
+    s.textContent = ' ' + msg;
+    td.appendChild(s);
+  }
+}
 
 function schemeOptions(cur) {
   return ['socks5', 'socks5h', 'http', 'https'].map(function (v) {
@@ -1006,6 +1129,100 @@ GW.actions['proxy-delete'] = function (ds) {
     },
   });
 };
+
+GW.actions['proxy-sel-all'] = function () { setAllProxyChecked(true); };
+GW.actions['proxy-sel-none'] = function () { setAllProxyChecked(false); };
+
+GW.actions['proxy-bulk-abort'] = function () {
+  if (PT.abort) { PT.abort.abort(); GW.toast('已请求中止，正在收尾', 'info'); }
+};
+
+/* 批量测试：勾选项走并发池逐个打 POST /proxies/{id}/test，结果逐行就地更新。
+ * 沿用模型测试页的编排：页面被切走或点中止都能及时收手，不再继续打代理。 */
+GW.actions['proxy-bulk-test'] = async function () {
+  if (PT.running) { GW.toast('批量测试进行中，请先中止', 'error'); return; }
+  var ids = selectedProxies().map(function (p) { return p.id; });
+  if (!ids.length) { GW.toast('请先勾选要测试的代理', 'error'); return; }
+
+  setProxyBulkRunning(true);
+  PT.abort = new AbortController();
+  var signal = PT.abort.signal;
+  var okCnt = 0, failCnt = 0, done = 0;
+  ids.forEach(function (id) { setProxyCheck(id, 'pending'); });
+  var paint = function (txt) {
+    var el = GW.$('proxyBulkInfo');
+    if (el) el.textContent = txt;
+  };
+  paint('测试中 0/' + ids.length + '（并发 ' + PROXY_TEST_CONC + '）');
+
+  var queue = ids.slice();
+  var worker = async function () {
+    while (queue.length) {
+      // 页面已被切走（core.render 清空了 content）→ 主动收手
+      if (!GW.$('proxyTableWrap')) { PT.abort.abort(); return; }
+      if (signal.aborted) {
+        queue.splice(0).forEach(function (id) { setProxyCheck(id, 'abort'); });
+        return;
+      }
+      var id = queue.shift();
+      setProxyCheck(id, 'running');
+      try {
+        var r = await api('/proxies/' + encodeURIComponent(id) + '/test',
+          { method: 'POST', signal: signal });
+        if (r.ok) okCnt++; else failCnt++;
+        setProxyCheck(id, r.ok ? 'ok' : 'fail', r.message);
+      } catch (e) {
+        if (e && e.name === 'AbortError') { setProxyCheck(id, 'abort'); continue; }
+        failCnt++;
+        setProxyCheck(id, 'fail', e.message);
+      }
+      done++;
+      paint('测试中 ' + done + '/' + ids.length + ' · 通过 ' + okCnt + ' · 失败 ' + failCnt);
+    }
+  };
+  var pool = [];
+  for (var i = 0; i < Math.min(PROXY_TEST_CONC, ids.length); i++) pool.push(worker());
+  await Promise.all(pool);
+
+  PT.abort = null;
+  if (!GW.$('proxyTableWrap')) { PT.running = false; return; }   // 页面已切走，不再碰 DOM
+  setProxyBulkRunning(false);
+  paint('本轮完成：' + okCnt + '/' + ids.length + ' 通过' + (failCnt ? '，' + failCnt + ' 失败' : ''));
+  GW.toast('批量测试完成：' + okCnt + '/' + ids.length + ' 通过',
+    okCnt === ids.length ? 'success' : 'info');
+};
+
+/* 批量启停：一次 PUT /proxies/status，只提交「状态确实需要变」的代理 */
+function bulkProxyStatus(status) {
+  if (PT.running) { GW.toast('批量测试进行中，请先中止', 'error'); return; }
+  var sel = selectedProxies();
+  if (!sel.length) { GW.toast('请先勾选要操作的代理', 'error'); return; }
+  var list = sel.filter(function (p) { return p.status !== status; });
+  var verb = status === 'active' ? '启用' : '停用';
+  if (!list.length) { GW.toast('勾选的代理均已' + verb, 'info'); return; }
+  GW.confirmModal({
+    title: '批量' + verb + '代理',
+    body: '将' + verb + ' ' + list.length + ' 个代理（已勾选 ' + sel.length + ' 个，其余已是该状态）。'
+      + (status === 'inactive'
+        ? '停用后立即退出轮询，绑定它们的上游密钥将临时回退直连。'
+        : '启用后立即参与轮询与绑定生效。'),
+    confirmText: '确定' + verb,
+    danger: status === 'inactive',
+    onConfirm: async function () {
+      var r = await api('/proxies/status', {
+        method: 'PUT',
+        body: JSON.stringify({
+          proxy_ids: list.map(function (p) { return p.id; }),
+          status: status,
+        }),
+      });
+      GW.toast(r.message || '已保存', 'success');
+      GW.R.proxies();
+    },
+  });
+}
+GW.actions['proxy-bulk-enable'] = function () { bulkProxyStatus('active'); };
+GW.actions['proxy-bulk-disable'] = function () { bulkProxyStatus('inactive'); };
 
 /* ================================================================
  *  下游客户 — GET/POST /clients, PUT/DELETE /clients/{id},

@@ -9,6 +9,8 @@
   （含 @ / : / percent-encoding）、路径拒收、IPv6 拒收、批内查重
 - 与 build_proxy_url 的往返对称性（解析出来的凭据拼回 URL 再解一次必须一致）
 - 契约守卫：单个添加路径必须保留；批量端点存在、需鉴权、不回传密码；查重不解密
+- 契约守卫：批量启停 PUT /proxies/status 注册在 /proxies/{proxy_id} 之前、状态白名单、
+  单条 UPDATE ... = ANY(%s)、每代理一条审计、失效代理池快照
 """
 import os
 
@@ -237,3 +239,58 @@ class TestContract:
     def test_default_name_prefix_present(self):
         assert BULK_PROXY_NAME_PREFIX
         assert f'BULK_PROXY_NAME_PREFIX = "{BULK_PROXY_NAME_PREFIX}"' in _MODULE_SRC
+
+
+class TestBulkStatusContract:
+    """批量启停 PUT /gw/admin/proxies/status 的源码契约守卫"""
+
+    def _body(self) -> str:
+        return _MODULE_SRC.split("async def bulk_update_proxy_status(")[1].split("\n\n\n")[0]
+
+    def test_endpoint_registered(self):
+        assert '@router.put("/proxies/status", tags=["管理员"])' in _MODULE_SRC
+        assert "async def bulk_update_proxy_status(" in _MODULE_SRC
+
+    def test_static_path_registered_before_path_param(self):
+        # 同一 PUT 方法下按注册顺序匹配：/proxies/status 若排在 /proxies/{proxy_id}
+        # 之后，"status" 会被当成 proxy_id 吞掉
+        assert _MODULE_SRC.index('@router.put("/proxies/status"') < _MODULE_SRC.index(
+            '@router.put("/proxies/{proxy_id}"'
+        )
+
+    def test_single_toggle_path_preserved(self):
+        # 批量启停是新增能力，单个启停/编辑仍走 PUT /proxies/{proxy_id}
+        assert '@router.put("/proxies/{proxy_id}", tags=["管理员"])' in _MODULE_SRC
+        assert "async def update_proxy(" in _MODULE_SRC
+
+    def test_requires_admin(self):
+        assert "await require_admin(request)" in self._body()
+
+    def test_status_whitelisted(self):
+        body = self._body()
+        assert 'req.status not in ("active", "inactive")' in body
+
+    def test_request_model_declared(self):
+        assert "class ProxyBulkStatusRequest(BaseModel):" in _MODULE_SRC
+
+    def test_ids_deduped_and_capped(self):
+        body = self._body()
+        assert "seen" in body and "BULK_MAX_LINES" in body
+
+    def test_single_update_via_any(self):
+        body = self._body()
+        assert "UPDATE proxies SET status = %s, updated_at = %s WHERE id = ANY(%s)" in body
+
+    def test_writes_in_thread(self):
+        body = self._body()
+        assert "asyncio.to_thread(_write)" in body
+
+    def test_skips_rows_already_in_target_state(self):
+        body = self._body()
+        assert 'r["status"] != req.status' in body
+
+    def test_one_audit_row_per_proxy(self):
+        assert "insert_audit_many" in self._body()
+
+    def test_invalidates_proxy_pool(self):
+        assert "proxy_pool.invalidate()" in self._body()

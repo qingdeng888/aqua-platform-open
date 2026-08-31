@@ -129,6 +129,33 @@ check(/proxy_urls/.test(proxyBulkAct) && /type: 'textarea'/.test(proxyBulkAct),
 check(proxyBulkAct.length > 0 && !/innerHTML/.test(proxyBulkAct),
   '代理批量添加动作内无 innerHTML');
 
+/* 8b4) 代理池多选批量：勾选 + 一键全选 + 批量测试/启用/停用 */
+const proxySelActs = ['proxy-sel-all', 'proxy-sel-none', 'proxy-bulk-test',
+  'proxy-bulk-enable', 'proxy-bulk-disable', 'proxy-bulk-abort'];
+const missingSelActs = proxySelActs.filter((a) => !dataSrc.includes(`GW.actions['${a}']`));
+check(missingSelActs.length === 0,
+  `代理池多选批量动作齐全 (缺失: ${missingSelActs.join(', ') || '无'})`);
+check(dataSrc.includes("'/proxies/status'") && /method: 'PUT'/.test(dataSrc),
+  '批量启停调用 PUT /proxies/status（一次请求，不逐个打 /proxies/{id}）');
+const proxyTable = (dataSrc.match(/function paintProxyTable\([\s\S]*?\n}/) || [''])[0];
+check(/data-pid="' \+ esc\(p\.id\)/.test(proxyTable),
+  '行 checkbox 与行 data-pid 均经 esc() 输出');
+check(/data-all="1"/.test(proxyTable), '表头提供一键全选 checkbox（data-all）');
+check(/\[data-all\]/.test(dataSrc) && /indeterminate/.test(dataSrc),
+  '表头全选支持三态（全选/半选/未选）');
+const proxyBulkTest = (dataSrc.match(/GW\.actions\['proxy-bulk-test'\][\s\S]*?\n};/) || [''])[0];
+check(/new AbortController\(\)/.test(proxyBulkTest) && /signal\.aborted/.test(proxyBulkTest),
+  '批量测试可中止（AbortController + signal.aborted 双检）');
+check(/PROXY_TEST_CONC/.test(proxyBulkTest) && /queue\.shift\(\)/.test(proxyBulkTest),
+  '批量测试走并发池（PROXY_TEST_CONC 个 worker 轮取队列）');
+check(/GW\.\$\('proxyTableWrap'\)/.test(proxyBulkTest),
+  '批量测试在页面被切走后主动收手（检查 proxyTableWrap 是否还在）');
+check(proxyBulkTest.length > 0 && !/innerHTML/.test(proxyBulkTest),
+  '批量测试动作内无 innerHTML');
+const proxyCheckFn = (dataSrc.match(/function setProxyCheck\([\s\S]*?\n}/) || [''])[0];
+check(/textContent = ' ' \+ msg/.test(proxyCheckFn),
+  '探测结果的后端文案走 textContent（badge 仅静态映射）');
+
 /* 8c) 模型测试页：动作齐全 + 自测密钥不落盘 + innerHTML 只写静态模板/已转义组件 */
 const testSrc = readFileSync(join(staticDir, 'js', 'console', 'pages-test.js'), 'utf8');
 const mtActs = ['mtest-refresh', 'mtest-show-key', 'mtest-rotate-key'];

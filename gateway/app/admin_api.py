@@ -153,6 +153,11 @@ class ProxyUpdateRequest(BaseModel):
     status: Optional[str] = None
     remark: Optional[str] = None
 
+class ProxyBulkStatusRequest(BaseModel):
+    """批量启停代理：控制台勾选若干代理后一次提交，语义与 PUT /models/visibility 对齐"""
+    proxy_ids: list
+    status: str                     # active | inactive
+
 class ClientCreateRequest(BaseModel):
     name: str
     user_type: str = "old"
@@ -648,6 +653,69 @@ async def bulk_create_proxies(req: ProxyBulkCreateRequest, request: Request):
     }
 
 
+@router.put("/proxies/status", tags=["管理员"])
+async def bulk_update_proxy_status(req: ProxyBulkStatusRequest, request: Request):
+    """批量启停代理：一条 UPDATE + 每个代理一条审计，与 PUT /models/visibility 同构
+
+    只写「状态确实需要变」的行——已是目标态的既不写库也不记审计，changed 反映真实变更数。
+    单个启停仍走 PUT /proxies/{id}（该路径同时承担编辑），两条路径并存。
+    """
+    await require_admin(request)
+
+    if req.status not in ("active", "inactive"):
+        raise HTTPException(status_code=400, detail="status 仅支持 active / inactive")
+
+    ids = []
+    seen = set()
+    for raw in (req.proxy_ids or []):
+        pid = (raw if isinstance(raw, str) else str(raw)).strip()
+        if pid and pid not in seen:
+            seen.add(pid)
+            ids.append(pid)
+    if not ids:
+        raise HTTPException(status_code=400, detail="proxy_ids 不能为空")
+    if len(ids) > BULK_MAX_LINES:
+        raise HTTPException(
+            status_code=400, detail=f"单次最多处理 {BULK_MAX_LINES} 个代理，请分批操作"
+        )
+
+    verb = "启用" if req.status == "active" else "停用"
+    rows = await asyncio.to_thread(
+        fetch_all, "SELECT id, name, status FROM proxies WHERE id = ANY(%s)", (ids,)
+    )
+    missing = len(ids) - len(rows)
+    todo = [r for r in rows if r["status"] != req.status]
+    if not todo:
+        msg = f"无需变更：{len(rows)} 个代理已是{verb}状态"
+        if missing:
+            msg += f"，{missing} 个已不存在"
+        return {"changed": 0, "requested": len(ids), "missing": missing, "message": msg}
+
+    todo_ids = [r["id"] for r in todo]
+    now = utcnow()
+
+    def _write():
+        n = execute(
+            "UPDATE proxies SET status = %s, updated_at = %s WHERE id = ANY(%s)",
+            (req.status, now, todo_ids),
+        )
+        insert_audit_many([
+            ("update", "proxy", r["id"], f"批量{verb}代理: {r['name']}") for r in todo
+        ])
+        return n
+
+    changed = await asyncio.to_thread(_write)
+    proxy_pool.invalidate()
+
+    logger.info(f"代理批量{verb}: {changed} 个")
+    msg = f"已{verb} {changed} 个代理"
+    if missing:
+        msg += f"，{missing} 个已不存在"
+    return {"changed": changed, "requested": len(ids), "missing": missing, "message": msg}
+
+
+# 注意：上面这条静态路径必须注册在 /proxies/{proxy_id} 之前，
+# 否则 "status" 会被当成 proxy_id 吞掉（同一 PUT 方法下按注册顺序匹配）
 @router.put("/proxies/{proxy_id}", tags=["管理员"])
 async def update_proxy(proxy_id: str, req: ProxyUpdateRequest, request: Request):
     """编辑代理（password 传空字符串表示清除认证信息）"""
